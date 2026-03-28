@@ -174,6 +174,11 @@ const HANGAR_UPGRADE_LEVEL_CAP = 100;
 const INFINITE_RUN_UPGRADE_LEVEL = Number.POSITIVE_INFINITY;
 const WEAPON_SWITCH_COOLDOWN = 1;
 const WEAPON_SWITCH_FIRE_DELAY = 0.16;
+const MULTIPLAYER_INPUT_INTERVAL = 0.05;
+const MULTIPLAYER_SNAPSHOT_INTERVAL = 0.1;
+const MULTIPLAYER_SYNC_RANGE = 1180;
+const MULTIPLAYER_SYNC_PROJECTILE_CAP = 180;
+const MULTIPLAYER_SYNC_ENEMY_CAP = 260;
 const MAX_SLOW_FIELD_RADIUS = 210;
 const PLANET_SPAWN_INTERVAL = 90;
 const PLANET_SPAWN_CHANCE = 0.25;
@@ -407,11 +412,20 @@ const state = {
       route: "asteroidBelt",
       difficulty: 1,
       timerMinutes: 5,
+      startingWeapon: "emberBolt",
     },
     connected: false,
     connecting: false,
     started: false,
     manualClose: false,
+    runtime: {
+      active: false,
+      mode: "solo",
+      remotePilots: {},
+      inputClock: 0,
+      snapshotClock: 0,
+      pendingDash: false,
+    },
   },
   sceneTransitionActive: false,
 };
@@ -3741,6 +3755,9 @@ function resetGame() {
   state.currentRun.advancedWeaponUnlocksPurchased = 0;
   state.voyageZoneClock = ventariVoyageActive(state.currentRun.voyageId) ? ventariZoneSpawnDelay() : 8;
   state.player = makePlayer();
+  if (multiplayerRunHost()) {
+    ensureMultiplayerRemotePilots();
+  }
   state.camera.x = state.player.x - WIDTH / (2 * CAMERA_ZOOM);
   state.camera.y = state.player.y - HEIGHT / (2 * CAMERA_ZOOM);
   overlay.classList.add("hidden");
@@ -5938,6 +5955,10 @@ function adjustFocusedRange(delta) {
 function performDash() {
   const player = state.player;
   if (!player || player.dashCooldown > 0 || state.mode !== "playing" || player.disabledTimer > 0) return;
+  if (multiplayerRunClient()) {
+    multiplayerRuntime().pendingDash = true;
+    return;
+  }
   const dashStaminaCost = player.dashStaminaCost || BASE_DASH_STAMINA_COST;
   if ((player.boostCharge || 0) < dashStaminaCost) return;
   const speed = Math.hypot(player.vx, player.vy);
@@ -6022,6 +6043,7 @@ function currentTeamVoyageSettings() {
     route: state.multiplayer?.lobbySettings?.route || "asteroidBelt",
     difficulty: clamp(Math.round(state.multiplayer?.lobbySettings?.difficulty || 1), 1, 5),
     timerMinutes: clamp(Math.round(state.multiplayer?.lobbySettings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
+    startingWeapon: state.multiplayer?.lobbySettings?.startingWeapon || state.runConfig.startingWeapon || "emberBolt",
   };
 }
 
@@ -6032,6 +6054,7 @@ function readTeamVoyagePreferences() {
     route: state.runConfig.voyageId || "asteroidBelt",
     difficulty: clamp(Math.round(state.runConfig.difficulty || 1), 1, 5),
     timerMinutes: Math.max(5, Math.round(getRunGoalTime() / 60)),
+    startingWeapon: state.runConfig.startingWeapon || "emberBolt",
   };
 }
 
@@ -6058,6 +6081,720 @@ function teamVoyageConnected() {
 
 function teamVoyageIsHost() {
   return Boolean(state.multiplayer.playerId && state.multiplayer.playerId === state.multiplayer.hostId);
+}
+
+function multiplayerRuntime() {
+  return state.multiplayer.runtime;
+}
+
+function multiplayerRunActive() {
+  return Boolean(multiplayerRuntime().active);
+}
+
+function multiplayerRunHost() {
+  return multiplayerRunActive() && multiplayerRuntime().mode === "host";
+}
+
+function multiplayerRunClient() {
+  return multiplayerRunActive() && multiplayerRuntime().mode === "client";
+}
+
+function clearMultiplayerRuntime() {
+  state.multiplayer.runtime = {
+    active: false,
+    mode: "solo",
+    remotePilots: {},
+    inputClock: 0,
+    snapshotClock: 0,
+    pendingDash: false,
+  };
+}
+
+function currentTeamVoyagePlayerRoster() {
+  return Array.isArray(state.multiplayer.players) ? state.multiplayer.players : [];
+}
+
+function teamVoyageRoomSettings() {
+  return {
+    route: state.multiplayer.lobbySettings?.route || "asteroidBelt",
+    difficulty: clamp(Math.round(state.multiplayer.lobbySettings?.difficulty || 1), 1, 5),
+    timerMinutes: clamp(Math.round(state.multiplayer.lobbySettings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
+    startingWeapon: state.multiplayer.lobbySettings?.startingWeapon || state.runConfig.startingWeapon || "emberBolt",
+  };
+}
+
+function applyTeamVoyageRoomSettingsToRun(room) {
+  const settings = room?.settings || teamVoyageRoomSettings();
+  state.runConfig.voyageId = settings.route === "ventariSystem" ? "ventariSystem" : "asteroidBelt";
+  state.runConfig.difficulty = clamp(Math.round(settings.difficulty || 1), 1, 5);
+  const timerMinutes = clamp(Math.round(settings.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5);
+  state.runConfig.extraTimeSteps = clamp(Math.round((timerMinutes - 5) / 5), 0, MAX_EXTRA_RUN_STEPS);
+  state.runConfig.startingWeapon = weaponDefs[settings.startingWeapon]?.slot === "primary"
+    ? settings.startingWeapon
+    : (state.runConfig.startingWeapon || "emberBolt");
+  syncHangarRunConfig();
+}
+
+function makeNetworkPilot(id, name, index = 0) {
+  const offsetAngle = (Math.PI * 2 * index) / Math.max(1, currentTeamVoyagePlayerRoster().length + 1);
+  const spawnDistance = 92;
+  const x = WORLD_W / 2 + Math.cos(offsetAngle) * spawnDistance;
+  const y = WORLD_H / 2 + Math.sin(offsetAngle) * spawnDistance;
+  const startingWeapon = teamVoyageRoomSettings().startingWeapon || "emberBolt";
+  return {
+    id,
+    name: name || "Pilot",
+    x,
+    y,
+    prevX: x,
+    prevY: y,
+    radius: 14,
+    speed: 340,
+    thrustPower: 1180,
+    vx: 0,
+    vy: 0,
+    facing: 0,
+    rotation: 0,
+    thrusting: false,
+    boosting: false,
+    boostCharge: BASE_BOOST_CAPACITY,
+    boostMax: BASE_BOOST_CAPACITY,
+    boostDrainRate: 40,
+    boostRegenRate: 26,
+    boostExhaustedCooldown: 2,
+    boostCooldown: 0,
+    dashCooldown: 0,
+    dashTimer: 0,
+    dashDistanceMultiplier: 1,
+    dashStaminaCost: BASE_DASH_STAMINA_COST,
+    invuln: 0,
+    enginePulse: 0,
+    engineOutput: 0,
+    hp: 100,
+    maxHp: 100,
+    shield: 100,
+    maxShield: 100,
+    level: 1,
+    scrap: 0,
+    attackSpeedMultiplier: 1,
+    attackDamageMultiplier: 1,
+    photonLanceCycleMultiplier: 1,
+    photonLanceDamageMultiplier: 1,
+    plasmaCannonDamageMultiplier: 1,
+    plasmaCannonWaveMultiplier: 1,
+    rangeMultiplier: 1,
+    hubPierce: 0,
+    extraAttacks: 0,
+    dualBarrelChance: 0,
+    novaLauncher: false,
+    primaryWeapon: startingWeapon,
+    weapons: {
+      emberBolt: { level: startingWeapon === "emberBolt" ? 1 : 0, cooldown: 0 },
+      plasmaCannon: { level: startingWeapon === "plasmaCannon" ? 1 : 0, cooldown: 0, waveFlip: 1 },
+      orbitBlades: { level: 0, angle: 0 },
+      photonPhazer: { level: 0, active: false, beamAlpha: 0, beamEndX: 0, beamEndY: 0 },
+    },
+    passives: {
+      piercingRounds: 0,
+      weaponRange: 0,
+    },
+    input: {
+      moveX: 0,
+      moveY: 0,
+      strength: 0,
+      active: false,
+      aimX: 1,
+      aimY: 0,
+      boost: 0,
+      dash: false,
+    },
+  };
+}
+
+function ensureMultiplayerRemotePilots() {
+  if (!multiplayerRunHost()) return;
+  const runtime = multiplayerRuntime();
+  const roster = currentTeamVoyagePlayerRoster().filter(player => player.id && player.id !== state.multiplayer.playerId);
+  const validIds = new Set();
+  roster.forEach((player, index) => {
+    validIds.add(player.id);
+    const existing = runtime.remotePilots[player.id];
+    if (!existing) {
+      runtime.remotePilots[player.id] = makeNetworkPilot(player.id, player.name, index + 1);
+    } else {
+      existing.name = player.name || existing.name;
+    }
+  });
+  for (const id of Object.keys(runtime.remotePilots)) {
+    if (!validIds.has(id)) {
+      delete runtime.remotePilots[id];
+    }
+  }
+}
+
+function visibleToAnyMultiplayerPilot(entity, padding = MULTIPLAYER_SYNC_RANGE) {
+  if (!entity) return false;
+  const pilots = [state.player, ...Object.values(multiplayerRuntime().remotePilots)];
+  return pilots.some(pilot => pilot && Math.abs(entity.x - pilot.x) <= padding && Math.abs(entity.y - pilot.y) <= padding);
+}
+
+function serializeMultiplayerPilot(id, pilot, extra = {}) {
+  const phazer = pilot?.weapons?.photonPhazer;
+  return {
+    id,
+    name: extra.name || "Pilot",
+    local: Boolean(extra.local),
+    x: pilot.x,
+    y: pilot.y,
+    vx: pilot.vx || 0,
+    vy: pilot.vy || 0,
+    facing: pilot.facing || 0,
+    rotation: pilot.rotation || 0,
+    radius: pilot.radius || 14,
+    hp: pilot.hp || 0,
+    maxHp: pilot.maxHp || 1,
+    shield: pilot.shield || 0,
+    maxShield: pilot.maxShield || 0,
+    level: pilot.level || 1,
+    scrap: Math.floor(pilot.scrap || 0),
+    boostCharge: pilot.boostCharge || 0,
+    boostMax: pilot.boostMax || BASE_BOOST_CAPACITY,
+    thrusting: Boolean(pilot.thrusting),
+    boosting: Boolean(pilot.boosting),
+    dashTimer: pilot.dashTimer || 0,
+    enginePulse: pilot.enginePulse || 0,
+    engineOutput: pilot.engineOutput || 0,
+    primaryWeapon: pilot.primaryWeapon || "emberBolt",
+    primaryWeaponLevel: primaryWeaponState(pilot)?.level || 0,
+    orbitBladeLevel: pilot?.weapons?.orbitBlades?.level || 0,
+    orbitBladeAngle: pilot?.weapons?.orbitBlades?.angle || 0,
+    photonPhazerLevel: pilot?.weapons?.photonPhazer?.level || 0,
+    phazerBeam: phazer && (phazer.target || phazer.active || phazer.afterglow > 0)
+      ? {
+        active: true,
+        beamAlpha: phazer.beamAlpha || 0,
+        beamEndX: phazer.target?.x ?? phazer.beamEndX ?? pilot.x,
+        beamEndY: phazer.target?.y ?? phazer.beamEndY ?? pilot.y,
+      }
+      : null,
+  };
+}
+
+function snapshotWorldState() {
+  const pilots = [];
+  const localName = currentTeamVoyagePlayerRoster().find(player => player.id === state.multiplayer.playerId)?.name || state.multiplayer.playerName;
+  pilots.push(serializeMultiplayerPilot(state.multiplayer.playerId || "host", state.player, { name: localName, local: true }));
+  for (const remote of Object.values(multiplayerRuntime().remotePilots)) {
+    pilots.push(serializeMultiplayerPilot(remote.id, remote, { name: remote.name, local: false }));
+  }
+
+  const enemies = [];
+  for (const enemy of state.enemies) {
+    if (enemy.alive === false || !visibleToAnyMultiplayerPilot(enemy)) continue;
+    enemies.push({
+      type: enemy.type,
+      x: enemy.x,
+      y: enemy.y,
+      radius: enemy.radius,
+      hp: enemy.hp,
+      maxHp: enemy.maxHp,
+      shield: enemy.shield || 0,
+      maxShield: enemy.maxShield || 0,
+      hitFlash: enemy.hitFlash || 0,
+      slowed: Boolean(enemy.slowed),
+      elite: Boolean(enemy.elite),
+      empTimer: enemy.empTimer || 0,
+      radiationTimer: enemy.radiationTimer || 0,
+      hackTimer: enemy.hackTimer || 0,
+      allyAuraRadius: enemy.allyAuraRadius || 0,
+      supportBuffed: Boolean(enemy.supportBuffed),
+      playerSlowRadius: enemy.playerSlowRadius || 0,
+      explodesOnProximity: Boolean(enemy.explodesOnProximity),
+      detonationRadius: enemy.detonationRadius || 0,
+    });
+    if (enemies.length >= MULTIPLAYER_SYNC_ENEMY_CAP) break;
+  }
+
+  const projectiles = [];
+  for (const shot of state.projectiles) {
+    if (!visibleToAnyMultiplayerPilot(shot, MULTIPLAYER_SYNC_RANGE + 180)) continue;
+    projectiles.push({
+      kind: shot.kind || "shot",
+      x: shot.x,
+      y: shot.y,
+      radius: shot.radius || 4,
+      color: shot.color || "#8af6ff",
+      hostile: Boolean(shot.hostile),
+      vx: shot.vx || 0,
+      vy: shot.vy || 0,
+      fadeAlpha: shot.fadeAlpha ?? 1,
+    });
+    if (projectiles.length >= MULTIPLAYER_SYNC_PROJECTILE_CAP) break;
+  }
+
+  return {
+    phase: state.mode,
+    time: state.time,
+    voyageProgress: state.voyageProgress,
+    kills: state.kills,
+    gold: state.gold,
+    statusText: statusText.textContent,
+    currentRun: {
+      goalTime: state.currentRun.goalTime,
+      difficulty: state.currentRun.difficulty,
+      voyageId: state.currentRun.voyageId,
+      startingWeapon: state.currentRun.startingWeapon,
+    },
+    pilots,
+    enemies,
+    projectiles,
+    asteroids: state.asteroids.filter(asteroid => visibleToAnyMultiplayerPilot(asteroid, MULTIPLAYER_SYNC_RANGE + 260)).map(asteroid => ({
+      x: asteroid.x,
+      y: asteroid.y,
+      radius: asteroid.radius,
+      rotation: asteroid.rotation || 0,
+    })),
+    gems: state.gems.filter(gem => visibleToAnyMultiplayerPilot(gem, MULTIPLAYER_SYNC_RANGE)).map(gem => ({
+      x: gem.x,
+      y: gem.y,
+      radius: gem.radius,
+      color: gem.color,
+    })),
+    crates: state.crates.filter(crate => visibleToAnyMultiplayerPilot(crate, MULTIPLAYER_SYNC_RANGE + 140)).map(crate => ({
+      x: crate.x,
+      y: crate.y,
+      bob: crate.bob || 0,
+      hue: crate.hue || 0,
+      saturation: crate.saturation || 1,
+      brightness: crate.brightness || 1,
+    })),
+    hazards: state.hazards.filter(hazard => visibleToAnyMultiplayerPilot(hazard, MULTIPLAYER_SYNC_RANGE + 180)).map(hazard => ({
+      x: hazard.x,
+      y: hazard.y,
+      radius: hazard.radius || 0,
+      life: hazard.life || 0,
+      maxLife: hazard.maxLife || 1,
+      kind: hazard.kind || "fragment",
+    })),
+    pulses: state.pulses.filter(pulse => visibleToAnyMultiplayerPilot(pulse, MULTIPLAYER_SYNC_RANGE + 180)).map(pulse => ({
+      x: pulse.x,
+      y: pulse.y,
+      radius: pulse.radius || 0,
+    })),
+    orbitalStrikes: state.orbitalStrikes.filter(strike => visibleToAnyMultiplayerPilot(strike, MULTIPLAYER_SYNC_RANGE + 240)).map(strike => ({
+      x: strike.x,
+      y: strike.y,
+      radius: strike.radius || 0,
+      delay: strike.delay || 0,
+      color: strike.color || "#8af6ff",
+    })),
+    voyageZones: state.voyageZones.filter(zone => visibleToAnyMultiplayerPilot(zone, MULTIPLAYER_SYNC_RANGE + 260)).map(zone => ({
+      x: zone.x,
+      y: zone.y,
+      radius: zone.radius || 0,
+      life: zone.life || 0,
+      maxLife: zone.maxLife || 1,
+      phase: zone.phase || 0,
+      type: zone.type,
+    })),
+  };
+}
+
+function applyPilotSnapshot(target, snapshot) {
+  if (!target || !snapshot) return;
+  target.x = snapshot.x;
+  target.y = snapshot.y;
+  target.prevX = snapshot.x;
+  target.prevY = snapshot.y;
+  target.vx = snapshot.vx || 0;
+  target.vy = snapshot.vy || 0;
+  target.facing = snapshot.facing || 0;
+  target.rotation = snapshot.rotation || 0;
+  target.radius = snapshot.radius || 14;
+  target.hp = snapshot.hp || 0;
+  target.maxHp = snapshot.maxHp || 1;
+  target.shield = snapshot.shield || 0;
+  target.maxShield = snapshot.maxShield || 0;
+  target.level = snapshot.level || 1;
+  target.scrap = snapshot.scrap || 0;
+  target.boostCharge = snapshot.boostCharge || 0;
+  target.boostMax = snapshot.boostMax || BASE_BOOST_CAPACITY;
+  target.thrusting = Boolean(snapshot.thrusting);
+  target.boosting = Boolean(snapshot.boosting);
+  target.dashTimer = snapshot.dashTimer || 0;
+  target.enginePulse = snapshot.enginePulse || 0;
+  target.engineOutput = snapshot.engineOutput || 0;
+  target.primaryWeapon = snapshot.primaryWeapon || target.primaryWeapon || "emberBolt";
+  if (!target.weapons) {
+    target.weapons = {
+      orbitBlades: { level: 0, angle: 0 },
+      photonPhazer: { active: false, beamAlpha: 0, beamEndX: 0, beamEndY: 0 },
+    };
+  }
+  if (!target.weapons[snapshot.primaryWeapon || target.primaryWeapon || "emberBolt"]) {
+    target.weapons[snapshot.primaryWeapon || target.primaryWeapon || "emberBolt"] = { level: 0, cooldown: 0 };
+  }
+  if (snapshot.primaryWeapon) {
+    target.weapons[snapshot.primaryWeapon].level = Math.max(
+      target.weapons[snapshot.primaryWeapon].level || 0,
+      snapshot.primaryWeaponLevel || 1
+    );
+  }
+  target.weapons.orbitBlades = {
+    ...(target.weapons.orbitBlades || {}),
+    level: snapshot.orbitBladeLevel || 0,
+    angle: snapshot.orbitBladeAngle || 0,
+  };
+  target.weapons.photonPhazer = {
+    ...(target.weapons.photonPhazer || {}),
+    level: snapshot.photonPhazerLevel || target.weapons.photonPhazer?.level || 0,
+    active: Boolean(snapshot.phazerBeam?.active),
+    beamAlpha: snapshot.phazerBeam?.beamAlpha || 0,
+    beamEndX: snapshot.phazerBeam?.beamEndX || target.x,
+    beamEndY: snapshot.phazerBeam?.beamEndY || target.y,
+  };
+}
+
+function applyWorldSnapshot(snapshot) {
+  if (!multiplayerRunClient() || !snapshot) return;
+  state.time = snapshot.time || 0;
+  state.voyageProgress = snapshot.voyageProgress || 0;
+  state.kills = snapshot.kills || 0;
+  state.gold = snapshot.gold || 0;
+  if (snapshot.statusText) {
+    statusText.textContent = snapshot.statusText;
+  }
+  if (snapshot.currentRun) {
+    state.currentRun.goalTime = snapshot.currentRun.goalTime || state.currentRun.goalTime;
+    state.currentRun.difficulty = snapshot.currentRun.difficulty || state.currentRun.difficulty;
+    state.currentRun.voyageId = snapshot.currentRun.voyageId || state.currentRun.voyageId;
+    state.currentRun.startingWeapon = snapshot.currentRun.startingWeapon || state.currentRun.startingWeapon;
+  }
+  const pilots = Array.isArray(snapshot.pilots) ? snapshot.pilots : [];
+  const localPilot = pilots.find(pilot => pilot.id === state.multiplayer.playerId) || pilots[0];
+  if (localPilot) {
+    if (!state.player) {
+      state.player = makePlayer();
+    }
+    applyPilotSnapshot(state.player, localPilot);
+  }
+  const remotes = {};
+  pilots.filter(pilot => pilot.id !== state.multiplayer.playerId).forEach(pilot => {
+    const entity = makeNetworkPilot(pilot.id, pilot.name);
+    applyPilotSnapshot(entity, pilot);
+    remotes[pilot.id] = entity;
+  });
+  multiplayerRuntime().remotePilots = remotes;
+  state.enemies = (snapshot.enemies || []).map(enemy => ({ ...enemy }));
+  state.projectiles = (snapshot.projectiles || []).map(shot => ({ ...shot }));
+  state.asteroids = (snapshot.asteroids || []).map(entry => ({ ...entry }));
+  state.gems = (snapshot.gems || []).map(entry => ({ ...entry }));
+  state.crates = (snapshot.crates || []).map(entry => ({ ...entry }));
+  state.hazards = (snapshot.hazards || []).map(entry => ({ ...entry }));
+  state.pulses = (snapshot.pulses || []).map(entry => ({ ...entry }));
+  state.orbitalStrikes = (snapshot.orbitalStrikes || []).map(entry => ({ ...entry }));
+  state.voyageZones = (snapshot.voyageZones || []).map(entry => ({ ...entry }));
+}
+
+function currentMultiplayerInput() {
+  const move = getMoveVector();
+  let aimX = Math.cos(state.player?.facing || 0);
+  let aimY = Math.sin(state.player?.facing || 0);
+  if (Math.hypot(state.gamepad.aimX, state.gamepad.aimY) > 0.1) {
+    aimX = state.gamepad.aimX;
+    aimY = state.gamepad.aimY;
+  } else if (state.pointerActive && Math.hypot(state.pointerVector.x, state.pointerVector.y) > 0.08) {
+    aimX = state.pointerVector.x;
+    aimY = state.pointerVector.y;
+  } else if (move.active) {
+    aimX = move.x;
+    aimY = move.y;
+  }
+  return {
+    moveX: move.x,
+    moveY: move.y,
+    strength: move.strength,
+    active: move.active,
+    aimX,
+    aimY,
+    boost: Math.max(clamp(state.gamepad.boostAmount || 0, 0, 1), state.keys.has("shiftleft") ? 1 : 0),
+    dash: Boolean(multiplayerRuntime().pendingDash),
+  };
+}
+
+function sendMultiplayerClientEvent(payload) {
+  if (!state.multiplayer.socket || state.multiplayer.socket.readyState !== 1) return;
+  state.multiplayer.socket.send(JSON.stringify({
+    type: "client_event",
+    payload,
+  }));
+}
+
+function tickMultiplayerClientInput(dt) {
+  if (!multiplayerRunClient() || state.mode !== "playing") return;
+  const runtime = multiplayerRuntime();
+  runtime.inputClock += dt;
+  if (runtime.inputClock < MULTIPLAYER_INPUT_INTERVAL) return;
+  runtime.inputClock = 0;
+  sendMultiplayerClientEvent({
+    kind: "pilot_input",
+    input: currentMultiplayerInput(),
+  });
+  runtime.pendingDash = false;
+}
+
+function updateRemotePilot(pilot, dt) {
+  if (!pilot) return;
+  const input = pilot.input || {};
+  const currentSpeed = Math.hypot(pilot.vx, pilot.vy);
+  const boostRequested = (input.boost || 0) > 0.12 && (input.active || currentSpeed > 28);
+  pilot.boostCooldown = Math.max(0, pilot.boostCooldown - dt);
+  pilot.boosting = boostRequested && pilot.boostCharge > 0.2 && pilot.dashTimer <= 0 && pilot.boostCooldown <= 0;
+  const boostStrength = pilot.boosting ? Math.max(0.35, input.boost || 0) : 0;
+  if (pilot.boosting) {
+    pilot.boostCharge = Math.max(0, pilot.boostCharge - pilot.boostDrainRate * boostStrength * dt);
+    if (pilot.boostCharge <= 0.05) {
+      pilot.boostCharge = 0;
+      pilot.boosting = false;
+      pilot.boostCooldown = pilot.boostExhaustedCooldown;
+    }
+  } else if (pilot.boostCooldown <= 0) {
+    pilot.boostCharge = Math.min(pilot.boostMax, pilot.boostCharge + pilot.boostRegenRate * dt);
+  }
+  const maxSpeed = pilot.speed * (1 + boostStrength * 0.78);
+  const thrust = pilot.thrustPower * (1 + boostStrength * 1.08);
+  const activeDrag = Math.exp(-dt * 4.4);
+  const idleDrag = Math.exp(-dt * 14);
+  pilot.thrusting = Boolean(input.active);
+  pilot.prevX = pilot.x;
+  pilot.prevY = pilot.y;
+  pilot.dashCooldown = Math.max(0, pilot.dashCooldown - dt);
+  pilot.dashTimer = Math.max(0, pilot.dashTimer - dt);
+  if (pilot.dashTimer > 0) {
+    pilot.invuln = Math.max(pilot.invuln || 0, pilot.dashTimer);
+  }
+  if (input.active) {
+    pilot.vx += (input.moveX || 0) * thrust * (input.strength || 1) * dt;
+    pilot.vy += (input.moveY || 0) * thrust * (input.strength || 1) * dt;
+  }
+  const drag = pilot.dashTimer > 0 ? 1 : input.active ? activeDrag : idleDrag;
+  pilot.vx *= drag;
+  pilot.vy *= drag;
+  if (!input.active && Math.hypot(pilot.vx, pilot.vy) < 10) {
+    pilot.vx = 0;
+    pilot.vy = 0;
+  }
+  const speed = Math.hypot(pilot.vx, pilot.vy);
+  if (speed > maxSpeed) {
+    const scale = maxSpeed / speed;
+    pilot.vx *= scale;
+    pilot.vy *= scale;
+  }
+  if (input.dash && pilot.dashCooldown <= 0 && pilot.boostCharge >= pilot.dashStaminaCost) {
+    const dashVelocity = 3920 * (pilot.dashDistanceMultiplier || 1);
+    const aimX = input.aimX || (input.active ? input.moveX : Math.cos(pilot.facing));
+    const aimY = input.aimY || (input.active ? input.moveY : Math.sin(pilot.facing));
+    const aimLength = Math.hypot(aimX, aimY) || 1;
+    pilot.vx = (aimX / aimLength) * dashVelocity;
+    pilot.vy = (aimY / aimLength) * dashVelocity;
+    pilot.boostCharge = Math.max(0, pilot.boostCharge - pilot.dashStaminaCost);
+    pilot.dashCooldown = 1;
+    pilot.dashTimer = 0.46;
+  }
+  pilot.x = clamp(pilot.x + pilot.vx * dt, pilot.radius, WORLD_W - pilot.radius);
+  pilot.y = clamp(pilot.y + pilot.vy * dt, pilot.radius, WORLD_H - pilot.radius);
+  if (Math.hypot(input.aimX || 0, input.aimY || 0) > 0.08) {
+    pilot.facing = Math.atan2(input.aimY, input.aimX);
+  } else if (speed > 18) {
+    pilot.facing = Math.atan2(pilot.vy, pilot.vx);
+  }
+  pilot.rotation = pilot.facing + Math.PI / 2;
+  const thrustVisual = Math.min(1, (input.active ? 0.28 : 0) + (pilot.boosting ? 0.72 : 0) + (pilot.dashTimer > 0 ? 0.82 : 0));
+  pilot.engineOutput += (thrustVisual - pilot.engineOutput) * Math.min(1, dt * (thrustVisual > pilot.engineOutput ? 14 : 6));
+  pilot.enginePulse += dt * (pilot.boosting ? 16 : 9) * (0.55 + pilot.engineOutput * 0.65);
+  pilot.input.dash = false;
+}
+
+function fireRemoteEmberBolt(pilot) {
+  if (!pilot?.weapons?.emberBolt || pilot.weapons.emberBolt.level <= 0) return;
+  const target = nearestEnemyFrom(pilot, 900);
+  if (!target) return;
+  const angle = Math.atan2(target.y - pilot.y, target.x - pilot.x);
+  const damage = (14 + pilot.weapons.emberBolt.level * 5)
+    * (pilot.attackDamageMultiplier || 1)
+    * (pilot.photonLanceDamageMultiplier || 1);
+  state.projectiles.push({
+    kind: "ember",
+    x: pilot.x,
+    y: pilot.y,
+    radius: 6,
+    vx: Math.cos(angle) * (440 + pilot.weapons.emberBolt.level * 18),
+    vy: Math.sin(angle) * (440 + pilot.weapons.emberBolt.level * 18),
+    life: 1.4 * ((pilot.rangeMultiplier || 1) + (pilot.passives?.weaponRange || 0) * 0.12),
+    damage,
+    baseDamage: damage,
+    pierce: (pilot.weapons.emberBolt.level >= 4 ? 1 : 0) + (pilot.hubPierce || 0) + (pilot.passives?.piercingRounds || 0),
+    pierceDamageMultiplier: 0.75,
+    hitEnemies: new Set(),
+    critChance: 0,
+    color: "#ffc274",
+    hostile: false,
+    systemType: "normal",
+  });
+}
+
+function fireRemotePlasmaCannon(pilot) {
+  if (!pilot?.weapons?.plasmaCannon || pilot.weapons.plasmaCannon.level <= 0) return;
+  const target = nearestEnemyFrom(pilot, 360);
+  if (!target) return;
+  const level = pilot.weapons.plasmaCannon.level;
+  const angle = Math.atan2(target.y - pilot.y, target.x - pilot.x);
+  const endRadius = Math.min(PLASMA_CANNON_MAX_END_RADIUS, (18 + level * 1.9) * 1.5);
+  const startRadius = Math.max(7, endRadius * 0.34);
+  const maxLife = 0.34 + level * 0.024;
+  const maxDistance = Math.min(
+    118 + level * 14,
+    Math.max(78, PLASMA_CANNON_MAX_REACH - 34 - endRadius * 0.35)
+  );
+  const crestHeight = Math.min(PLASMA_CANNON_MAX_CREST_HEIGHT, (24 + level * 3.2) * 1.5);
+  const waveFlip = pilot.weapons.plasmaCannon.waveFlip || 1;
+  state.projectiles.push({
+    kind: "plasma",
+    x: pilot.x + Math.cos(angle) * 34,
+    y: pilot.y + Math.sin(angle) * 34,
+    radius: startRadius,
+    vx: Math.cos(angle),
+    vy: Math.sin(angle),
+    life: maxLife,
+    maxLife,
+    age: 0,
+    damage: (7 + level * 3.2) * (pilot.attackDamageMultiplier || 1) * (pilot.plasmaCannonDamageMultiplier || 1),
+    baseDamage: (7 + level * 3.2) * (pilot.attackDamageMultiplier || 1) * (pilot.plasmaCannonDamageMultiplier || 1),
+    pierce: 999 + (pilot.hubPierce || 0) + (pilot.passives?.piercingRounds || 0),
+    pierceDamageMultiplier: 1,
+    hitEnemies: new Set(),
+    critChance: 0,
+    color: "#74f3ff",
+    hostile: false,
+    systemType: "normal",
+    originX: pilot.x + Math.cos(angle) * 34,
+    originY: pilot.y + Math.sin(angle) * 34,
+    forwardX: Math.cos(angle),
+    forwardY: Math.sin(angle),
+    sideX: Math.cos(angle + Math.PI / 2),
+    sideY: Math.sin(angle + Math.PI / 2),
+    lateralOffset: 0,
+    arcDirection: waveFlip,
+    crestHeight,
+    maxDistance,
+    startRadius,
+    endRadius,
+    inheritedVx: pilot.vx,
+    inheritedVy: pilot.vy,
+    progress: 0,
+    fadeAlpha: 0,
+  });
+  pilot.weapons.plasmaCannon.waveFlip = -waveFlip;
+}
+
+function updateRemotePilotWeapons(dt) {
+  if (!multiplayerRunHost()) return;
+  for (const pilot of Object.values(multiplayerRuntime().remotePilots)) {
+    if (!pilot || (pilot.disabledTimer || 0) > 0) continue;
+    const primaryId = pilot.primaryWeapon || "emberBolt";
+    const primary = pilot.weapons?.[primaryId];
+    if (!primary || primary.level <= 0) continue;
+    primary.cooldown = (primary.cooldown || 0) - dt;
+    const primaryRate = primaryId === "plasmaCannon"
+      ? Math.max(0.22, (0.92 - primary.level * 0.07) / (pilot.attackSpeedMultiplier || 1))
+      : Math.max(0.14, (0.72 - primary.level * 0.06) / ((pilot.attackSpeedMultiplier || 1) * (pilot.photonLanceCycleMultiplier || 1)));
+    if (primary.cooldown <= 0) {
+      if (primaryId === "plasmaCannon") {
+        fireRemotePlasmaCannon(pilot);
+      } else {
+        fireRemoteEmberBolt(pilot);
+      }
+      primary.cooldown = primaryRate;
+    }
+  }
+}
+
+function updateRemotePilots(dt) {
+  if (!multiplayerRunHost()) return;
+  ensureMultiplayerRemotePilots();
+  for (const pilot of Object.values(multiplayerRuntime().remotePilots)) {
+    updateRemotePilot(pilot, dt);
+  }
+  updateRemotePilotWeapons(dt);
+}
+
+function sendMultiplayerSnapshot(dt) {
+  if (!multiplayerRunHost() || state.mode !== "playing") return;
+  const runtime = multiplayerRuntime();
+  runtime.snapshotClock += dt;
+  if (runtime.snapshotClock < MULTIPLAYER_SNAPSHOT_INTERVAL) return;
+  runtime.snapshotClock = 0;
+  sendMultiplayerClientEvent({
+    kind: "run_snapshot",
+    snapshot: snapshotWorldState(),
+  });
+}
+
+function handleMultiplayerClientEvent(from, payload) {
+  if (!payload?.kind) return;
+  if (payload.kind === "pilot_input" && multiplayerRunHost()) {
+    ensureMultiplayerRemotePilots();
+    const pilot = multiplayerRuntime().remotePilots[from];
+    if (pilot) {
+      pilot.input = {
+        ...pilot.input,
+        ...(payload.input || {}),
+      };
+    }
+    return;
+  }
+  if (payload.kind === "run_snapshot" && multiplayerRunClient()) {
+    applyWorldSnapshot(payload.snapshot);
+    return;
+  }
+  if (payload.kind === "run_complete" && multiplayerRunClient()) {
+    const summary = payload.summary || {};
+    const stats = payload.stats || {};
+    state.time = Number(stats.time || state.time || 0);
+    state.gold = Number(stats.gold || 0);
+    state.kills = Number(stats.kills || 0);
+    state.runStats = {
+      ...freshRunStats(),
+      ...state.runStats,
+      damageDealt: Number(stats.damageDealt || 0),
+      damageTaken: Number(stats.damageTaken || 0),
+      scrapRecovered: Number(stats.scrapRecovered || 0),
+      bonusAugmentsAwarded: Number(stats.bonusAugmentsAwarded || 0),
+      crudeCachesAwarded: Number(stats.crudeCachesAwarded || 0),
+      ardonisCachesAwarded: Number(stats.ardonisCachesAwarded || 0),
+    };
+    state.pendingHangarMessage = summary.pendingHangarMessage || "Team Voyage complete. Returning to hangar.";
+    closeTeamVoyageSocket("", true);
+    showRunSummary({
+      title: summary.title || "Team Voyage Complete",
+      body: summary.body || "The synchronized voyage has ended.",
+      personalBest: false,
+    });
+  }
+}
+
+function launchTeamVoyageRun(room) {
+  if (multiplayerRunActive()) return;
+  applyTeamVoyageRoomSettingsToRun(room);
+  const runtime = multiplayerRuntime();
+  runtime.active = true;
+  runtime.mode = teamVoyageIsHost() ? "host" : "client";
+  runtime.inputClock = 0;
+  runtime.snapshotClock = 0;
+  runtime.pendingDash = false;
+  runtime.remotePilots = {};
+  showHangar("Team Voyage link locked. Preparing synchronized launch.");
+  beginLaunchSequence();
 }
 
 function updateTeamVoyageBackLabel() {
@@ -6134,7 +6871,7 @@ function renderTeamVoyageLobby() {
   }
   if (teamVoyageLobbyNote) {
     teamVoyageLobbyNote.textContent = state.multiplayer.started
-      ? "Start signal sent. The room is live and ready for the next shared-flight hookup."
+      ? "The room is live. Host snapshots now drive the synchronized flight while the session stays active."
       : host
         ? "You are the host. Route, time, and threat changes will sync to every pilot in the room."
         : "Host controls are locked on your side. You will receive route, time, and threat updates from the host.";
@@ -6161,7 +6898,13 @@ function updateTeamVoyageStateFromRoom(room) {
     route: room.settings?.route === "ventariSystem" ? "ventariSystem" : "asteroidBelt",
     difficulty: clamp(Math.round(room.settings?.difficulty || 1), 1, 5),
     timerMinutes: clamp(Math.round(room.settings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
+    startingWeapon: weaponDefs[room.settings?.startingWeapon]?.slot === "primary"
+      ? room.settings.startingWeapon
+      : (state.multiplayer.lobbySettings?.startingWeapon || state.runConfig.startingWeapon || "emberBolt"),
   };
+  if (multiplayerRunHost()) {
+    ensureMultiplayerRemotePilots();
+  }
   renderTeamVoyageLobby();
 }
 
@@ -6200,6 +6943,9 @@ function closeTeamVoyageSocket(message = "", preserveStatus = false) {
   state.multiplayer.players = [];
   state.multiplayer.roomCode = "";
   state.multiplayer.started = false;
+  if (multiplayerRunActive()) {
+    clearMultiplayerRuntime();
+  }
   renderTeamVoyageLobby();
   if (message && !preserveStatus) {
     setTeamVoyageStatus(message);
@@ -6231,6 +6977,10 @@ function connectTeamVoyageSocket(roomCode) {
           resolved = true;
           resolve(message.room);
         }
+        if (message.room?.started && !multiplayerRunActive()) {
+          setTeamVoyageStatus("Live room detected. Linking synchronized voyage.");
+          launchTeamVoyageRun(message.room);
+        }
         return;
       }
       if (message.type === "room_update") {
@@ -6238,9 +6988,14 @@ function connectTeamVoyageSocket(roomCode) {
         setTeamVoyageStatus(`Room ${state.multiplayer.roomCode} synced. ${state.multiplayer.players.length} pilot${state.multiplayer.players.length === 1 ? "" : "s"} linked.`);
         return;
       }
+      if (message.type === "client_event") {
+        handleMultiplayerClientEvent(message.from, message.payload);
+        return;
+      }
       if (message.type === "game_started") {
         updateTeamVoyageStateFromRoom(message.room);
-        setTeamVoyageStatus("Start signal received. Team Voyage gameplay sync is the next hookup step.");
+        setTeamVoyageStatus("Synchronized launch initiated.");
+        launchTeamVoyageRun(message.room);
         return;
       }
       if (message.type === "error") {
@@ -6254,6 +7009,7 @@ function connectTeamVoyageSocket(roomCode) {
     socket.addEventListener("close", () => {
       const intentional = state.multiplayer.manualClose;
       state.multiplayer.manualClose = false;
+      const runtimeWasActive = multiplayerRunActive();
       state.multiplayer.socket = null;
       state.multiplayer.connected = false;
       state.multiplayer.connecting = false;
@@ -6261,6 +7017,9 @@ function connectTeamVoyageSocket(roomCode) {
       state.multiplayer.hostId = null;
       state.multiplayer.players = [];
       state.multiplayer.started = false;
+      if (runtimeWasActive) {
+        clearMultiplayerRuntime();
+      }
       renderTeamVoyageLobby();
       if (!intentional) {
         setTeamVoyageStatus("Lobby link closed.");
@@ -6347,6 +7106,7 @@ function leaveTeamVoyageLobby(message = "Lobby link closed.") {
     route: state.runConfig.voyageId || "asteroidBelt",
     difficulty: clamp(Math.round(state.runConfig.difficulty || 1), 1, 5),
     timerMinutes: Math.max(5, Math.round(getRunGoalTime() / 60)),
+    startingWeapon: state.runConfig.startingWeapon || "emberBolt",
   };
   renderTeamVoyageLobby();
 }
@@ -6389,7 +7149,7 @@ function adjustTeamVoyageDifficulty(delta) {
 function startTeamVoyageLobby() {
   if (!teamVoyageConnected() || !teamVoyageIsHost() || !state.multiplayer.socket) return;
   state.multiplayer.socket.send(JSON.stringify({ type: "start_game" }));
-  setTeamVoyageStatus("Start signal sent to the room.");
+  setTeamVoyageStatus("Start signal sent. Syncing the room into live flight.");
 }
 
 async function copyTeamVoyageCode() {
@@ -6659,7 +7419,8 @@ function renderVoyageUpgradesMenu() {
     const alreadyUnlocked = voyageWeaponChoiceUnlocked(choice, player);
     const hubLocked = voyageUpgradeHubLocked(choice);
     const cost = alreadyUnlocked || hubLocked ? 0 : voyageUpgradeCost(choice, player);
-    const affordable = !alreadyUnlocked && !hubLocked && (player.scrap || 0) >= cost;
+    const hostPurchaseLocked = multiplayerRunClient();
+    const affordable = !hostPurchaseLocked && !alreadyUnlocked && !hubLocked && (player.scrap || 0) >= cost;
     const card = document.createElement("div");
     card.className = `meta-upgrade voyage-upgrade${alreadyUnlocked ? " unlocked" : ""}${hubLocked ? " locked" : ""}`;
     card.innerHTML = `
@@ -6676,7 +7437,7 @@ function renderVoyageUpgradesMenu() {
           <p>${voyageUpgradeCardSummary(choice)}</p>
         </div>
       </div>
-      <button type="button" class="voyage-upgrade-purchase${alreadyUnlocked ? " is-unlocked" : ""}" data-voyage-upgrade-id="${choice.id}" ${affordable ? "" : "disabled"}>${voyageUpgradePurchaseLabel(choice, affordable, cost, player)}</button>
+      <button type="button" class="voyage-upgrade-purchase${alreadyUnlocked ? " is-unlocked" : ""}" data-voyage-upgrade-id="${choice.id}" ${affordable ? "" : "disabled"}>${hostPurchaseLocked ? "Host Sync Active" : voyageUpgradePurchaseLabel(choice, affordable, cost, player)}</button>
     `;
     populateUpgradeArt(card.querySelector(".meta-upgrade-icon"), choice.id, choice.title, "meta-upgrade-icon-image");
     const button = card.querySelector("button");
@@ -6712,6 +7473,10 @@ function closeVoyageUpgradesMenu() {
 
 function purchaseVoyageUpgrade(choice) {
   if (!choice || !state.player) return;
+  if (multiplayerRunClient()) {
+    statusText.textContent = "Client-side voyage purchases are locked during the first sync pass.";
+    return;
+  }
   if (voyageUpgradeHubLocked(choice)) return;
   if (voyageWeaponChoiceUnlocked(choice, state.player)) return;
   const previousLevel = voyageUpgradeLevel(choice, state.player);
@@ -6810,6 +7575,27 @@ function handleMenuBack() {
 
 function showRunSummary({ title, body, personalBest }) {
   const stats = state.runStats || freshRunStats();
+  if (multiplayerRunHost()) {
+    sendMultiplayerClientEvent({
+      kind: "run_complete",
+      summary: {
+        title,
+        body,
+        pendingHangarMessage: state.pendingHangarMessage || "Team Voyage complete. Returning to hangar.",
+      },
+      stats: {
+        time: state.time,
+        gold: state.gold,
+        kills: state.kills,
+        damageDealt: stats.damageDealt || 0,
+        damageTaken: stats.damageTaken || 0,
+        scrapRecovered: stats.scrapRecovered || 0,
+        bonusAugmentsAwarded: stats.bonusAugmentsAwarded || 0,
+        crudeCachesAwarded: stats.crudeCachesAwarded || 0,
+        ardonisCachesAwarded: stats.ardonisCachesAwarded || 0,
+      },
+    });
+  }
   hangarScreen.classList.add("hidden");
   overlay.classList.add("hidden");
   if (voyageUpgradesMenu) voyageUpgradesMenu.classList.add("hidden");
@@ -7016,6 +7802,11 @@ function beginPlayerDeathSequence(summaryPayload) {
 function closeRunSummary() {
   playSceneDoorTransition(() => {
     runSummary.classList.add("hidden");
+    if (teamVoyageConnected()) {
+      closeTeamVoyageSocket("", true);
+      setTeamVoyageStatus("Team Voyage session complete. Reopen Team Voyage to host or join a new room.");
+    }
+    clearMultiplayerRuntime();
     showHangar(state.pendingHangarMessage, { preserveTransition: true });
   });
 }
@@ -7033,6 +7824,15 @@ function launchRun() {
   runSummary.classList.add("hidden");
   if (voyageUpgradesMenu) voyageUpgradesMenu.classList.add("hidden");
   resetGame();
+  if (multiplayerRunActive()) {
+    state.mode = "playing";
+    upgradeChoices.classList.add("hidden");
+    upgradeChoices.innerHTML = "";
+    overlay.classList.add("hidden");
+    statusText.textContent = `Flight active. ${weaponDefs[state.currentRun.startingWeapon]?.name || "Photon Lance"} online.`;
+    syncHud();
+    return;
+  }
   presentStartingWeaponChoice();
 }
 
@@ -10353,6 +11153,12 @@ function update(dt) {
 
   state.shieldDamageFlash = Math.max(0, state.shieldDamageFlash - dt * 1.85);
   state.hullDamageFlash = Math.max(0, state.hullDamageFlash - dt * 1.55);
+  if (multiplayerRunClient()) {
+    updateEffects(dt);
+    updateCamera(dt);
+    syncHud();
+    return;
+  }
   state.time += dt;
   updateVoyageZones(dt);
   if (state.mode === "death") {
@@ -10425,6 +11231,7 @@ function update(dt) {
 
   spawnWave(dt);
   updatePlayer(dt);
+  updateRemotePilots(dt);
   updateAugmentSystems(dt);
   updateWeapons(dt);
   updateProjectiles(dt);
@@ -10728,6 +11535,138 @@ function drawBackground() {
   ctx.restore();
 
   drawScreenStarfield(ventari, time);
+}
+
+function drawNetworkPilots() {
+  const remotes = Object.values(multiplayerRuntime().remotePilots || {});
+  if (!remotes.length) return;
+
+  for (const pilot of remotes) {
+    if (!pilot) continue;
+    const primaryId = pilot.primaryWeapon || "emberBolt";
+    const accent = primaryId === "plasmaCannon" ? "#7ae0ff" : "#ffd585";
+    const hullColor = "#16243b";
+    const wingColor = "#273b59";
+
+    const phazer = pilot.weapons?.photonPhazer;
+    if ((phazer?.active || 0) && (phazer?.beamAlpha || 0) > 0.02) {
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      ctx.strokeStyle = `rgba(120, 236, 255, ${0.26 * phazer.beamAlpha})`;
+      ctx.lineWidth = 12;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(pilot.x, pilot.y);
+      ctx.lineTo(phazer.beamEndX || pilot.x, phazer.beamEndY || pilot.y);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(232, 251, 255, ${0.86 * phazer.beamAlpha})`;
+      ctx.lineWidth = 3.4;
+      ctx.beginPath();
+      ctx.moveTo(pilot.x, pilot.y);
+      ctx.lineTo(phazer.beamEndX || pilot.x, phazer.beamEndY || pilot.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    const orbitLevel = pilot.weapons?.orbitBlades?.level || 0;
+    if (orbitLevel > 0) {
+      const count = Math.min(6, orbitBladeCount(orbitLevel));
+      const radius = orbitBladeRadius(orbitLevel);
+      const baseAngle = pilot.weapons?.orbitBlades?.angle || 0;
+      for (let i = 0; i < count; i += 1) {
+        const angle = baseAngle + (Math.PI * 2 * i) / count;
+        const bx = pilot.x + Math.cos(angle) * radius;
+        const by = pilot.y + Math.sin(angle) * radius;
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(angle + Math.PI / 2);
+        ctx.fillStyle = "#10223b";
+        ctx.beginPath();
+        ctx.moveTo(0, -8);
+        ctx.lineTo(7, 8);
+        ctx.lineTo(0, 4);
+        ctx.lineTo(-7, 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "rgba(138, 246, 255, 0.8)";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    ctx.save();
+    ctx.translate(pilot.x, pilot.y);
+    ctx.rotate(pilot.rotation || pilot.facing + Math.PI / 2);
+
+    const thrustGlow = Math.max(0.18, pilot.engineOutput || 0);
+    ctx.fillStyle = `rgba(106, 236, 255, ${0.18 + thrustGlow * 0.22})`;
+    ctx.beginPath();
+    ctx.ellipse(0, 20, 14, 16 + thrustGlow * 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = hullColor;
+    ctx.beginPath();
+    ctx.moveTo(0, -18);
+    ctx.lineTo(14, 13);
+    ctx.lineTo(5, 9);
+    ctx.lineTo(0, 16);
+    ctx.lineTo(-5, 9);
+    ctx.lineTo(-14, 13);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = wingColor;
+    ctx.beginPath();
+    ctx.moveTo(0, -14);
+    ctx.lineTo(10, 10);
+    ctx.lineTo(0, 6);
+    ctx.lineTo(-10, 10);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -18);
+    ctx.lineTo(14, 13);
+    ctx.lineTo(5, 9);
+    ctx.lineTo(0, 16);
+    ctx.lineTo(-5, 9);
+    ctx.lineTo(-14, 13);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(215, 244, 255, 0.9)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, -11);
+    ctx.lineTo(0, 8);
+    ctx.stroke();
+
+    ctx.restore();
+
+    if ((pilot.shield || 0) > 0) {
+      const shieldRatio = clamp(pilot.shield / Math.max(1, pilot.maxShield || pilot.shield || 1), 0, 1);
+      ctx.save();
+      ctx.strokeStyle = `rgba(122, 224, 255, ${0.24 + shieldRatio * 0.32})`;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.arc(pilot.x, pilot.y, 18.5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.font = "600 12px Rajdhani, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#dff8ff";
+    ctx.strokeStyle = "rgba(6, 14, 28, 0.82)";
+    ctx.lineWidth = 3.4;
+    ctx.strokeText(pilot.name || "Wing", pilot.x, pilot.y - 28);
+    ctx.fillText(pilot.name || "Wing", pilot.x, pilot.y - 28);
+    ctx.restore();
+  }
 }
 
 function drawPlayer() {
@@ -11973,6 +12912,7 @@ function draw() {
     drawOrbitBlades();
     drawSupportDrones();
   }
+  drawNetworkPilots();
   drawPlayer();
   drawEffects();
   ctx.restore();
@@ -11985,7 +12925,9 @@ function frame(ts) {
   pollGamepad();
   updateMenuConfirmHold(dt);
   tickMusic(dt);
+  tickMultiplayerClientInput(dt);
   update(dt);
+  sendMultiplayerSnapshot(dt);
   draw();
   requestAnimationFrame(frame);
 }

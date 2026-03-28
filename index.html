@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="Assets/Sprites/Ship%20favicon.png">
+  <title>Starfall Survivors</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <section id="main-menu-screen" class="main-menu-screen">
+    <div class="main-menu-grid">
+      <div class="main-menu-hero">
+        <div class="main-menu-stars"></div>
+        <div class="main-menu-starfield far"></div>
+        <div class="main-menu-starfield near"></div>
+        <div class="main-menu-debris back"></div>
+        <div class="main-menu-debris front"></div>
+        <div class="main-menu-hero-glow"></div>
+        <div class="main-menu-flight-lane">
+          <div class="main-menu-ship-wrap">
+            <div class="hangar-ship main-menu-ship">
+              <div class="hangar-flame left"></div>
+              <div class="hangar-flame right"></div>
+              <div class="hangar-fighter"></div>
+            </div>
+          </div>
+        </div>
+        <div class="main-menu-hero-copy">
+          <p class="eyebrow">Command Interface</p>
+          <h1>Starfall Survivors</h1>
+          <p class="main-menu-copy">Launch into hostile sectors, outfit the ship, and prepare for deeper systems ahead.</p>
+        </div>
+      </div>
+      <div class="main-menu-panel">
+        <p class="eyebrow">Deployment Options</p>
+        <h2>Choose Your Route</h2>
+        <p id="main-menu-status" class="main-menu-copy main-menu-status">Select a command to continue.</p>
+        <div class="main-menu-actions">
+          <button id="main-menu-solo-button" class="primary-button main-menu-action-button" type="button">
+            <strong>Solo Voyage</strong>
+            <span>Enter the hangar and launch a solo run.</span>
+          </button>
+          <button id="main-menu-team-button" class="primary-button main-menu-action-button" type="button">
+            <strong>Team Voyage</strong>
+            <span>Open the co-op command menu for hosting or joining later.</span>
+          </button>
+          <button id="main-menu-settings-button" class="primary-button main-menu-action-button" type="button">
+            <strong>Settings</strong>
+            <span>Adjust fullscreen, music, and SFX levels.</span>
+          </button>
+          <button id="main-menu-leaderboards-button" class="primary-button main-menu-action-button locked" type="button">
+            <strong>Leaderboards</strong>
+            <span>Locked. Long-range ranking data will be added later.</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="hangar-screen" class="hangar-screen hidden">
+    <div class="hangar-grid">
+      <section class="hangar-center">
+        <div id="hangar-window" class="hangar-window">
+          <div class="hangar-stars"></div>
+          <div class="hangar-starfield far"></div>
+          <div class="hangar-starfield near"></div>
+          <div class="hangar-asteroids back"></div>
+          <div class="hangar-asteroids front"></div>
+          <div class="hangar-window-glow"></div>
+          <div class="hangar-window-overlay">
+            <div class="hangar-window-copy">
+              <p class="eyebrow">Current Loadout</p>
+              <h2>Deployment Console</h2>
+              <p class="hangar-copy">Finalize route telemetry, threat calibration, and launch parameters before committing the ship to deep space.</p>
+            </div>
+            <div class="hangar-window-chip-row">
+              <div class="hangar-window-chip">
+                <span>Route</span>
+                <strong id="hangar-route-chip">Asteroid Belt</strong>
+              </div>
+              <div class="hangar-window-chip">
+                <span>Voyage Length</span>
+                <strong id="hangar-length-chip">05:00</strong>
+              </div>
+              <div class="hangar-window-chip">
+                <span>Threat Level</span>
+                <strong id="hangar-threat-chip">Normal</strong>
+              </div>
+              <div class="hangar-window-chip accent">
+                <span>Credit Bonus</span>
+                <strong id="hangar-bonus-chip">+0% Credits</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="hangar-pad">
+          <div class="hangar-ship-card">
+            <div class="hangar-ship">
+              <div class="hangar-flame left"></div>
+              <div class="hangar-flame right"></div>
+              <div class="hangar-fighter"></div>
+            </div>
+            <div class="hangar-ship-label">
+              <strong>UESC Venture</strong>
+              <span>Interceptor Class</span>
+              <span class="hangar-ship-online"><i></i>Systems Online</span>
+            </div>
+          </div>
+          <div class="hangar-start-block">
+            <p class="eyebrow">Ready To Deploy</p>
+            <h2>Start Voyage</h2>
+            <p id="hangar-status" class="hangar-copy">Begin your voyage when ready.</p>
+            <div class="hangar-run-config">
+              <div class="hangar-config-card">
+                <span class="hangar-config-title">Voyage Route</span>
+                <p id="hangar-voyage-readout" class="hangar-config-help">Asteroid Belt. Threat Signature I. Standard route with asteroid strikes on higher threat levels.</p>
+                <div class="hangar-voyage-grid">
+                  <button id="hangar-voyage-asteroid" class="hangar-voyage-button selected" type="button">Asteroid Belt<span>Threat I</span></button>
+                  <button id="hangar-voyage-ventari" class="hangar-voyage-button" type="button">Ventari System<span>Threat II</span></button>
+                </div>
+              </div>
+              <div class="hangar-config-card">
+                <span class="hangar-config-title">Voyage Length</span>
+                <p class="hangar-config-help">Extend the voyage in 5 minute jumps.</p>
+                <div class="hangar-stepper">
+                  <button id="hangar-time-down" class="hud-action-button hangar-mini-button" type="button">-5m</button>
+                  <strong id="hangar-time-readout">05:00</strong>
+                  <button id="hangar-time-up" class="hud-action-button hangar-mini-button" type="button">+5m</button>
+                </div>
+              </div>
+              <div class="hangar-config-card">
+                <label for="hangar-difficulty" class="hangar-config-title">Threat Level</label>
+                <p class="hangar-config-help">Choose a threat level for the next voyage.</p>
+                <div class="hangar-slider-row">
+                  <input id="hangar-difficulty" class="hangar-slider" type="range" min="1" max="5" step="1" value="1">
+                  <strong id="hangar-difficulty-readout">Normal</strong>
+                </div>
+              </div>
+            </div>
+            <button id="hangar-start-button" class="primary-button hangar-start-button" type="button">Start Voyage</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="hangar-panel hangar-stats">
+        <div class="hangar-panel-head">
+          <p class="eyebrow">Ship Systems</p>
+          <h2>Ship Statistics</h2>
+        </div>
+        <div id="hangar-stats-grid" class="hangar-stats-grid"></div>
+      </section>
+
+      <section class="hangar-panel hangar-shop">
+        <div class="hangar-panel-head">
+          <h2 class="hangar-panel-title"><strong>Bay Systems</strong></h2>
+        </div>
+        <p class="hangar-copy">Upgrade core systems, manage augments, and review your voyage data before the next jump.</p>
+        <div class="hangar-panel-actions">
+          <button id="hangar-upgrades-button" class="primary-button hangar-open-upgrades hangar-dock-button" type="button"><span class="hangar-dock-label"><span class="hangar-dock-icon gear" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.2v2.1M12 18.7v2.1M3.2 12h2.1M18.7 12h2.1M5.8 5.8l1.5 1.5M16.7 16.7l1.5 1.5M18.2 5.8l-1.5 1.5M7.3 16.7l-1.5 1.5"/></svg></span><strong>Engineering Bay</strong></span><span>Upgrade core systems and ship performance</span></button>
+          <button id="hangar-augments-button" class="primary-button hangar-open-augments hangar-dock-button" type="button"><span class="hangar-dock-label"><span class="hangar-dock-icon augment" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 3.8 18.2 7.4v9.2L12 20.2 5.8 16.6V7.4Z"/><path d="M12 8.1v7.8M8.6 10.1l6.8 3.8M15.4 10.1l-6.8 3.8"/></svg></span><strong>Augment Bay</strong></span><span>Unlock and equip passive ship augments</span></button>
+          <button id="hangar-hostiles-button" class="primary-button hangar-open-hostiles hangar-dock-button" type="button"><span class="hangar-dock-label"><span class="hangar-dock-icon hostile" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 3.8 18.2 7.3v9.4L12 20.2 5.8 16.7V7.3Z"/><path d="M12 8.1v7.8M8.1 12h7.8"/></svg></span><strong>Hostile Data Systems</strong></span><span>Review confirmed enemy contacts and intel</span></button>
+          <button id="hangar-records-button" class="primary-button hangar-open-records hangar-dock-button" type="button"><span class="hangar-dock-label"><span class="hangar-dock-icon record" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="6.5" y="4.5" width="11" height="15" rx="1.8"/><path d="M9.1 9.2h5.8M9.1 12.2h5.8M9.1 15.2h4.4"/></svg></span><strong>Service Record</strong></span><span>Track voyage totals and recovered archives</span></button>
+        </div>
+      </section>
+    </div>
+
+  </section>
+
+  <div id="main-menu-settings-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card main-menu-settings-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Systems</p>
+          <h2>Main Menu</h2>
+        </div>
+        <button id="main-menu-settings-back" class="hud-action-button hangar-submenu-back" type="button">Back</button>
+      </div>
+      <div class="pause-options hangar-settings-options">
+        <button id="main-menu-fullscreen" class="hud-action-button" type="button">Toggle Fullscreen</button>
+        <label class="pause-slider-row" for="main-menu-music-volume">
+          <span>Music</span>
+          <input id="main-menu-music-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="main-menu-music-volume-readout">80%</strong>
+        </label>
+        <label class="pause-slider-row" for="main-menu-sfx-volume">
+          <span>Gun SFX</span>
+          <input id="main-menu-sfx-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="main-menu-sfx-volume-readout">80%</strong>
+        </label>
+        <label class="pause-slider-row" for="main-menu-other-sfx-volume">
+          <span>Other SFX</span>
+          <input id="main-menu-other-sfx-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="main-menu-other-sfx-volume-readout">80%</strong>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div id="team-voyage-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card team-voyage-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Co-Op Command</p>
+          <h2>Team Voyage</h2>
+        </div>
+        <button id="team-voyage-back" class="hud-action-button hangar-submenu-back" type="button">Back</button>
+      </div>
+      <p class="hangar-copy">Create a co-op room, share the code, and sync lobby settings through your Render multiplayer server.</p>
+      <div class="team-voyage-grid">
+        <button id="team-voyage-host" class="primary-button main-menu-action-button team-voyage-option" type="button">
+          <strong>Host Voyage</strong>
+          <span>Create a co-op lobby and generate a room code for another player.</span>
+        </button>
+        <button id="team-voyage-join" class="primary-button main-menu-action-button team-voyage-option" type="button">
+          <strong>Join Voyage</strong>
+          <span>Join another pilot’s lobby with a room code once the server is connected.</span>
+        </button>
+      </div>
+      <p id="team-voyage-status" class="main-menu-copy team-voyage-status">Co-op frontend menu ready. Next step is wiring the room server and lobby code flow.</p>
+    </div>
+  </div>
+
+  <div id="hangar-settings-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card hangar-settings-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Systems</p>
+          <h2>Main Menu</h2>
+        </div>
+        <button id="hangar-settings-back" class="hud-action-button hangar-submenu-back" type="button">Back To Hangar</button>
+      </div>
+      <div class="pause-options hangar-settings-options">
+        <button id="hangar-fullscreen" class="hud-action-button" type="button">Toggle Fullscreen</button>
+        <label class="pause-slider-row" for="hangar-music-volume">
+          <span>Music</span>
+          <input id="hangar-music-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="hangar-music-volume-readout">80%</strong>
+        </label>
+        <label class="pause-slider-row" for="hangar-sfx-volume">
+          <span>Gun SFX</span>
+          <input id="hangar-sfx-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="hangar-sfx-volume-readout">80%</strong>
+        </label>
+        <label class="pause-slider-row" for="hangar-other-sfx-volume">
+          <span>Other SFX</span>
+          <input id="hangar-other-sfx-volume" type="range" min="0" max="100" step="1" value="80">
+          <strong id="hangar-other-sfx-volume-readout">80%</strong>
+        </label>
+        <button id="hangar-reset-progress" class="hud-action-button hangar-reset-button" type="button">Reset Progress</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="hangar-upgrades-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Engineering Bay</p>
+          <h2>Engineering Bay</h2>
+        </div>
+        <button id="hangar-upgrades-back" class="hud-action-button hangar-submenu-back" type="button">Back To Hangar</button>
+      </div>
+      <p class="hangar-copy">Spend Ardonis Credits to harden the ship between voyages.</p>
+      <div class="hangar-upgrade-summary hangar-sticky-resource-group">
+        <div id="hangar-upgrade-bank" class="hangar-bank hangar-upgrade-bank">Ardonis Credits: 0</div>
+        <button id="hangar-upgrades-respec" class="hud-action-button hangar-reset-button hangar-upgrades-respec" type="button">Respec Ship Upgrades</button>
+      </div>
+      <div id="hangar-meta-upgrades" class="meta-upgrades"></div>
+    </div>
+  </div>
+
+  <div id="hangar-records-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Engineering Bay</p>
+          <h2>Service Record</h2>
+        </div>
+        <button id="hangar-records-back" class="hud-action-button hangar-submenu-back" type="button">Back To Hangar</button>
+      </div>
+      <p class="hangar-copy">Review voyage history, lifetime recovery totals, and augment recovery records.</p>
+      <div id="hangar-records-grid" class="hangar-stats-grid"></div>
+    </div>
+  </div>
+
+  <div id="hangar-hostiles-menu" class="hangar-submenu hidden">
+    <div id="hangar-hostiles-card" class="hangar-submenu-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Threat Archive</p>
+          <h2>Hostile Data Systems</h2>
+        </div>
+        <button id="hangar-hostiles-back" class="hud-action-button hangar-submenu-back" type="button">Back To Hangar</button>
+      </div>
+      <p class="hangar-copy">Review every confirmed hostile signature, their combat role, and the hull profile you will face during a voyage.</p>
+      <div class="hostile-intel-summary hangar-sticky-resource-group">
+        <div id="hangar-hostiles-summary" class="hangar-bank hangar-upgrade-bank">Cataloged Contacts: 0</div>
+      </div>
+      <div id="hangar-hostiles-grid" class="hostile-intel-grid"></div>
+    </div>
+  </div>
+
+  <div id="hangar-augments-menu" class="hangar-submenu hidden">
+    <div class="hangar-submenu-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Augment Bay</p>
+          <h2>Ship Augments</h2>
+        </div>
+        <button id="hangar-augments-back" class="hud-action-button hangar-submenu-back" type="button">Back To Hangar</button>
+      </div>
+      <p class="hangar-copy">Unlock basic augments with Crude Augment Caches and rare augments with Ardonis Augment Caches, then equip up to five before launch.</p>
+      <div class="augment-bay-summary hangar-sticky-resource-group">
+        <div id="hangar-augment-bank" class="hangar-bank hangar-upgrade-bank">Ardonis Credits: 0</div>
+        <div id="hangar-augment-cache" class="hangar-bank hangar-upgrade-bank">Crude Augment Caches: 0</div>
+        <div id="hangar-rare-augment-cache" class="hangar-bank hangar-upgrade-bank">Ardonis Augment Caches: 0</div>
+        <div id="hangar-augment-loadout" class="hangar-bank hangar-upgrade-bank">Equipped: 0 / 5</div>
+      </div>
+      <div id="hangar-equipped-augments" class="run-summary-chip-row augment-equipped-row"></div>
+      <div id="hangar-augment-grid" class="augment-grid"></div>
+    </div>
+  </div>
+
+  <div id="run-summary" class="run-summary hidden">
+    <div class="run-summary-card">
+      <div id="run-summary-scroll" class="run-summary-scroll">
+        <p class="eyebrow">Voyage Report</p>
+        <h2 id="run-summary-title">Voyage Summary</h2>
+        <p id="run-summary-body" class="hangar-copy">Voyage complete.</p>
+        <div id="run-summary-grid" class="run-summary-grid"></div>
+        <div id="run-summary-kills" class="run-summary-kills"></div>
+        <div id="run-summary-augments" class="run-summary-augments"></div>
+      </div>
+      <button id="run-summary-close" class="primary-button hangar-start-button" type="button">Back To Hangar</button>
+    </div>
+  </div>
+
+  <div id="mod-menu" class="mod-menu hidden">
+    <div class="mod-menu-card">
+      <div class="hangar-submenu-head">
+        <div>
+          <p class="eyebrow">Override Console</p>
+          <h2>Engineering Override</h2>
+        </div>
+        <button id="mod-menu-close" class="hud-action-button hangar-submenu-back" type="button">Close</button>
+      </div>
+      <p class="hangar-copy mod-menu-copy">Hidden systems menu. Credit injections apply immediately. Maxed Engineering Bay upgrades are saved permanently and will fully apply on the next voyage.</p>
+        <div class="mod-menu-sticky">
+          <div id="mod-menu-bank" class="hangar-bank hangar-upgrade-bank">Ardonis Credits: 0</div>
+          <div class="mod-menu-credit-actions">
+            <button class="hud-action-button mod-credit-button" type="button" data-mod-credit="1000">+1K Credits</button>
+            <button class="hud-action-button mod-credit-button" type="button" data-mod-credit="10000">+10K Credits</button>
+            <button class="hud-action-button mod-credit-button" type="button" data-mod-credit="100000">+100K Credits</button>
+            <button class="hud-action-button mod-credit-button" type="button" data-mod-credit="1000000">+1M Credits</button>
+            <button id="mod-unlock-augments" class="hud-action-button mod-unlock-button" type="button">Unlock All Augments</button>
+          </div>
+        </div>
+        <div id="mod-menu-upgrades" class="meta-upgrades mod-menu-upgrades"></div>
+      </div>
+  </div>
+
+  <div id="scene-transition" class="scene-transition hidden" aria-hidden="true">
+    <div class="scene-transition-door left">
+      <span class="scene-transition-door-text">DANGER</span>
+    </div>
+    <div class="scene-transition-door right">
+      <span class="scene-transition-door-text">Stand Clear</span>
+    </div>
+    <div class="scene-transition-banner">DANGER Stand Clear</div>
+  </div>
+
+  <div class="shell scene-hidden">
+    <aside class="panel">
+      <div class="brand">
+        <p class="eyebrow">Browser Space Survival</p>
+        <h1>Starfall Survivors</h1>
+        <p class="lede">Drift through hostile starfields, gather scrap, and scale into a fleet-breaking menace.</p>
+      </div>
+
+      <div class="card controls">
+        <h2>Controls</h2>
+        <p><strong>Move:</strong> WASD or arrow keys</p>
+        <p><strong>Boost / Dash:</strong> Left Shift boost, Space dash</p>
+        <p><strong>Controller:</strong> Left stick move, right stick face, RT boost, A dash or confirm, Y voyage upgrades, Start settings or pause</p>
+        <p><strong>Menus:</strong> Escape or P, Start on controller</p>
+        <p><strong>Voyage Upgrades:</strong> Tab on keyboard or Y on controller</p>
+        <p><strong>Touch:</strong> Drag anywhere on the arena</p>
+      </div>
+
+      <div class="card">
+        <h2>Run Tips</h2>
+        <ul>
+          <li>Weapons fire automatically at the nearest threats.</li>
+          <li>New alien waves appear as the clock advances.</li>
+          <li>Drones are strong early, pulse builds scale later.</li>
+        </ul>
+      </div>
+
+      <div class="card stats">
+        <div class="stat-row"><span>Time</span><strong id="time-readout">00:00</strong></div>
+        <div class="stat-row"><span>Ver.</span><strong id="level-readout">1.01</strong></div>
+        <div class="stat-row"><span>Scrap</span><strong id="xp-readout">0</strong></div>
+        <div class="stat-row"><span>Defeated</span><strong id="kill-readout">0</strong></div>
+        <div class="stat-row"><span>Ardonis Credits</span><strong id="gold-readout">0</strong></div>
+      </div>
+
+      <div class="card">
+        <h2>Status</h2>
+        <p id="status-text" class="status-text">Begin a voyage when you are ready.</p>
+        <button id="start-button" class="primary-button" type="button">Start Voyage</button>
+      </div>
+
+      <div class="card">
+        <div class="section-header">
+          <h2>Hangar Upgrades</h2>
+          <strong id="bank-readout" class="bank-readout">Bank: 0 Ardonis Credits</strong>
+        </div>
+        <p class="status-text">Persistent upgrades are bought with Ardonis Credits earned from runs.</p>
+        <div id="meta-upgrades" class="meta-upgrades"></div>
+      </div>
+    </aside>
+
+    <main class="arena-shell">
+      <div class="arena-frame">
+        <canvas id="game" width="1280" height="720" aria-label="Starfall Survivors game"></canvas>
+        <div class="cockpit-shell" aria-hidden="true">
+          <div class="cockpit-brace cockpit-brace-left"></div>
+          <div class="cockpit-brace cockpit-brace-right"></div>
+          <div class="cockpit-brace cockpit-brace-bottom-left"></div>
+          <div class="cockpit-brace cockpit-brace-bottom-right"></div>
+          <div class="cockpit-reticle"></div>
+        </div>
+        <div class="hud cockpit-hud pilot-hud bottom-center">
+          <div class="pilot-hud-head">
+            <div class="hud-title">Pilot</div>
+          </div>
+          <div class="pilot-integrity-head">
+            <div class="pilot-integrity-stat">
+              <span>Hull</span>
+              <strong id="health-readout">0 / 0</strong>
+            </div>
+            <div class="pilot-integrity-stat">
+              <span>Shield</span>
+              <strong id="shield-readout">0 / 0</strong>
+            </div>
+          </div>
+          <div class="bar layered-bar integrity-bar">
+            <div id="health-bar" class="fill health-fill"></div>
+            <div id="shield-bar" class="fill shield-fill"></div>
+          </div>
+          <div id="player-effect-icons" class="player-effect-icons"></div>
+        </div>
+
+        <div class="hud cockpit-hud threat-hud top-right">
+          <div id="minute-warning" class="minute-warning">Hold 12:00</div>
+          <div id="enemy-readout" class="enemy-readout">Contacts: 0</div>
+        </div>
+
+        <div class="hud cockpit-hud bottom-left arsenal-hud">
+          <div class="arsenal-title-row">
+            <span class="arsenal-title">Arsenal</span>
+            <strong id="weapon-switch-readout" class="weapon-switch-readout">Single system online</strong>
+          </div>
+          <div id="arsenal-grid" class="arsenal-grid"></div>
+          <div id="build-readout" class="build-readout arsenal-build-readout">Photon Lance Ver. 1.01</div>
+          <p id="hud-status-text" class="hud-status-text">Begin a voyage when you are ready.</p>
+        </div>
+
+        <div class="hud cockpit-hud bottom-right resource-hud">
+          <div class="hud-title">Resources</div>
+          <div class="resource-grid">
+            <div class="pilot-counter-block">
+              <span>Ardonis Credits</span>
+              <strong id="bar-gold-readout">0</strong>
+            </div>
+            <div class="pilot-counter-block">
+              <span>Scrap</span>
+              <strong id="bar-xp-readout">0</strong>
+            </div>
+          </div>
+        </div>
+
+        <div id="voyage-upgrades-menu" class="voyage-upgrades-menu hidden">
+          <div class="voyage-upgrades-card">
+            <div class="hangar-submenu-head">
+              <div>
+                <p class="eyebrow">Field Engineering</p>
+                <h2>Voyage Upgrades</h2>
+              </div>
+              <button id="voyage-upgrades-close" class="hud-action-button hangar-submenu-back" type="button">Resume Voyage</button>
+            </div>
+            <p class="hangar-copy voyage-upgrades-copy">Spend recovered Scrap on any unlockable or active voyage system. Press Tab on keyboard or Y on controller to return to the fight.</p>
+            <div class="voyage-upgrades-sticky">
+              <div id="voyage-upgrade-bank" class="hangar-bank hangar-upgrade-bank">Scrap: 0</div>
+              <div id="voyage-upgrade-version" class="hangar-bank hangar-upgrade-bank">Ship Version: Ver. 1.01</div>
+            </div>
+            <div id="voyage-upgrade-grid" class="meta-upgrades voyage-upgrade-grid"></div>
+          </div>
+        </div>
+
+        <div id="overlay" class="overlay">
+          <div class="overlay-panel">
+            <p class="overlay-kicker">Orbital Command</p>
+            <h2 id="overlay-title">Starfall Survivors</h2>
+            <p id="overlay-body">A space survival arena inspired by horde auto-battlers. Strafe, upgrade, and survive the siege.</p>
+            <div id="upgrade-choices" class="upgrade-choices hidden"></div>
+            <div id="pause-options" class="pause-options hidden">
+              <button id="overlay-fullscreen" class="hud-action-button" type="button">Toggle Fullscreen</button>
+              <label class="pause-slider-row" for="music-volume">
+                <span>Music</span>
+                <input id="music-volume" type="range" min="0" max="100" step="1" value="80">
+                <strong id="music-volume-readout">80%</strong>
+              </label>
+              <label class="pause-slider-row" for="sfx-volume">
+                <span>Gun SFX</span>
+                <input id="sfx-volume" type="range" min="0" max="100" step="1" value="80">
+                <strong id="sfx-volume-readout">80%</strong>
+              </label>
+              <label class="pause-slider-row" for="other-sfx-volume">
+                <span>Other SFX</span>
+                <input id="other-sfx-volume" type="range" min="0" max="100" step="1" value="80">
+                <strong id="other-sfx-volume-readout">80%</strong>
+              </label>
+            </div>
+            <button id="overlay-button" class="primary-button" type="button">Begin</button>
+            <button id="overlay-end-voyage" class="hud-action-button overlay-end-button" type="button" style="display:none;">End Voyage</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>

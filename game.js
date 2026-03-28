@@ -65,6 +65,25 @@ const teamVoyageBack = document.getElementById("team-voyage-back");
 const teamVoyageHost = document.getElementById("team-voyage-host");
 const teamVoyageJoin = document.getElementById("team-voyage-join");
 const teamVoyageStatus = document.getElementById("team-voyage-status");
+const teamVoyageServerUrl = document.getElementById("team-voyage-server-url");
+const teamVoyagePlayerName = document.getElementById("team-voyage-player-name");
+const teamVoyageRoomInput = document.getElementById("team-voyage-room-input");
+const teamVoyageLobby = document.getElementById("team-voyage-lobby");
+const teamVoyageRoomCode = document.getElementById("team-voyage-room-code");
+const teamVoyageCopyCode = document.getElementById("team-voyage-copy-code");
+const teamVoyageRefresh = document.getElementById("team-voyage-refresh");
+const teamVoyageLeave = document.getElementById("team-voyage-leave");
+const teamVoyagePlayerList = document.getElementById("team-voyage-player-list");
+const teamVoyageRouteAsteroid = document.getElementById("team-voyage-route-asteroid");
+const teamVoyageRouteVentari = document.getElementById("team-voyage-route-ventari");
+const teamVoyageTimeDown = document.getElementById("team-voyage-time-down");
+const teamVoyageTimeUp = document.getElementById("team-voyage-time-up");
+const teamVoyageTimeReadout = document.getElementById("team-voyage-time-readout");
+const teamVoyageDifficultyDown = document.getElementById("team-voyage-difficulty-down");
+const teamVoyageDifficultyUp = document.getElementById("team-voyage-difficulty-up");
+const teamVoyageDifficultyReadout = document.getElementById("team-voyage-difficulty-readout");
+const teamVoyageStart = document.getElementById("team-voyage-start");
+const teamVoyageLobbyNote = document.getElementById("team-voyage-lobby-note");
 const hangarScreen = document.getElementById("hangar-screen");
 const hangarWindow = document.getElementById("hangar-window");
 const hangarBank = document.getElementById("hangar-bank");
@@ -167,6 +186,8 @@ const BASE_REPEAT_CRUDE_CACHE_CHANCE = 0.34;
 const ASTEROID_DAMAGE_START_DIFFICULTY = 3;
 const CAMERA_ZOOM = 0.68;
 const META_STORAGE_KEY = "starfall-survivors-meta-v2";
+const MULTIPLAYER_SERVER_STORAGE_KEY = "starfall-survivors-multiplayer-server";
+const MULTIPLAYER_NAME_STORAGE_KEY = "starfall-survivors-multiplayer-name";
 const BASE_BOOST_CAPACITY = 50;
 const BASE_DASH_STAMINA_COST = BASE_BOOST_CAPACITY * 0.25;
 const PHOTON_PHAZER_MAX_RANGE = 138;
@@ -372,6 +393,25 @@ const state = {
     musicVolume: 0.8,
     gunSfxVolume: 0.8,
     otherSfxVolume: 0.8,
+  },
+  multiplayer: {
+    serverUrl: "",
+    playerName: "Pilot",
+    joinCode: "",
+    roomCode: "",
+    socket: null,
+    playerId: null,
+    hostId: null,
+    players: [],
+    lobbySettings: {
+      route: "asteroidBelt",
+      difficulty: 1,
+      timerMinutes: 5,
+    },
+    connected: false,
+    connecting: false,
+    started: false,
+    manualClose: false,
   },
   sceneTransitionActive: false,
 };
@@ -5443,7 +5483,13 @@ function gamepadMenuTargets() {
     return [runSummaryClose];
   }
   if (teamVoyageMenu && !teamVoyageMenu.classList.contains("hidden")) {
-    return [teamVoyageBack, teamVoyageHost, teamVoyageJoin].filter(Boolean);
+    return Array.from(teamVoyageMenu.querySelectorAll("button")).filter(node => {
+      if (!(node instanceof HTMLButtonElement)) return false;
+      if (node.disabled) return false;
+      if (node.getClientRects().length === 0) return false;
+      const style = getComputedStyle(node);
+      return style.display !== "none" && style.visibility !== "hidden";
+    });
   }
   if (mainMenuSettingsMenu && !mainMenuSettingsMenu.classList.contains("hidden")) {
     return [mainMenuSettingsBack, mainMenuFullscreen, mainMenuMusicVolume, mainMenuSfxVolume, mainMenuOtherSfxVolume].filter(Boolean);
@@ -5936,9 +5982,441 @@ function setTeamVoyageStatus(message) {
   }
 }
 
+function defaultMultiplayerServerUrl() {
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") {
+    return "http://localhost:10000";
+  }
+  return "";
+}
+
+function normalizeServerUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let normalized = raw;
+  if (/^wss?:\/\//i.test(normalized)) {
+    normalized = normalized.replace(/^ws/i, "http");
+  } else if (!/^https?:\/\//i.test(normalized)) {
+    const localish = /^localhost\b|^127(?:\.\d{1,3}){3}\b/i.test(normalized);
+    normalized = `${localish ? "http" : "https"}://${normalized}`;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
+function multiplayerWsUrl(serverUrl, roomCode, playerName) {
+  const url = new URL(normalizeServerUrl(serverUrl));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/ws";
+  url.search = "";
+  url.searchParams.set("room", String(roomCode || "").toUpperCase());
+  url.searchParams.set("name", String(playerName || "Pilot").trim() || "Pilot");
+  return url.toString();
+}
+
+function multiplayerHttpUrl(serverUrl, path) {
+  return `${normalizeServerUrl(serverUrl)}${path}`;
+}
+
+function currentTeamVoyageSettings() {
+  return {
+    route: state.multiplayer?.lobbySettings?.route || "asteroidBelt",
+    difficulty: clamp(Math.round(state.multiplayer?.lobbySettings?.difficulty || 1), 1, 5),
+    timerMinutes: clamp(Math.round(state.multiplayer?.lobbySettings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
+  };
+}
+
+function readTeamVoyagePreferences() {
+  state.multiplayer.serverUrl = normalizeServerUrl(localStorage.getItem(MULTIPLAYER_SERVER_STORAGE_KEY) || defaultMultiplayerServerUrl());
+  state.multiplayer.playerName = String(localStorage.getItem(MULTIPLAYER_NAME_STORAGE_KEY) || "Pilot").trim().slice(0, 24) || "Pilot";
+  state.multiplayer.lobbySettings = {
+    route: state.runConfig.voyageId || "asteroidBelt",
+    difficulty: clamp(Math.round(state.runConfig.difficulty || 1), 1, 5),
+    timerMinutes: Math.max(5, Math.round(getRunGoalTime() / 60)),
+  };
+}
+
+function persistTeamVoyagePreferences() {
+  localStorage.setItem(MULTIPLAYER_SERVER_STORAGE_KEY, state.multiplayer.serverUrl || "");
+  localStorage.setItem(MULTIPLAYER_NAME_STORAGE_KEY, state.multiplayer.playerName || "Pilot");
+}
+
+function syncTeamVoyageFormState() {
+  if (teamVoyageServerUrl) {
+    teamVoyageServerUrl.value = state.multiplayer.serverUrl || "";
+  }
+  if (teamVoyagePlayerName) {
+    teamVoyagePlayerName.value = state.multiplayer.playerName || "Pilot";
+  }
+  if (teamVoyageRoomInput) {
+    teamVoyageRoomInput.value = state.multiplayer.joinCode || "";
+  }
+}
+
+function teamVoyageConnected() {
+  return Boolean(state.multiplayer.connected && state.multiplayer.roomCode);
+}
+
+function teamVoyageIsHost() {
+  return Boolean(state.multiplayer.playerId && state.multiplayer.playerId === state.multiplayer.hostId);
+}
+
+function updateTeamVoyageBackLabel() {
+  if (!teamVoyageBack) return;
+  teamVoyageBack.textContent = teamVoyageConnected() ? "Leave Lobby" : "Back";
+}
+
+function renderTeamVoyagePlayers() {
+  if (!teamVoyagePlayerList) return;
+  const players = Array.isArray(state.multiplayer.players) ? state.multiplayer.players : [];
+  if (!players.length) {
+    teamVoyagePlayerList.innerHTML = `<p class="team-voyage-player-empty">No pilots linked yet.</p>`;
+    return;
+  }
+  teamVoyagePlayerList.innerHTML = players.map(player => `
+    <div class="team-voyage-player-entry">
+      <strong>${player.name || "Pilot"}</strong>
+      <span class="team-voyage-player-role ${player.isHost ? "host" : "guest"}">${player.isHost ? "Host" : "Wing"}</span>
+    </div>
+  `).join("");
+}
+
+function renderTeamVoyageLobby() {
+  const connected = teamVoyageConnected();
+  if (teamVoyageLobby) {
+    teamVoyageLobby.classList.toggle("hidden", !connected);
+  }
+  if (teamVoyageRoomCode) {
+    teamVoyageRoomCode.textContent = connected ? state.multiplayer.roomCode : "----";
+  }
+  const lobbySettings = currentTeamVoyageSettings();
+  if (teamVoyageTimeReadout) {
+    teamVoyageTimeReadout.textContent = formatTime(lobbySettings.timerMinutes * 60);
+  }
+  if (teamVoyageDifficultyReadout) {
+    teamVoyageDifficultyReadout.textContent = difficultyLabels[lobbySettings.difficulty - 1] || "Normal";
+  }
+  if (teamVoyageRouteAsteroid) {
+    teamVoyageRouteAsteroid.classList.toggle("selected", lobbySettings.route === "asteroidBelt");
+  }
+  if (teamVoyageRouteVentari) {
+    teamVoyageRouteVentari.classList.toggle("selected", lobbySettings.route === "ventariSystem");
+  }
+  const host = teamVoyageIsHost();
+  const lockedVentari = !ventariSystemUnlocked();
+  if (teamVoyageRouteAsteroid) {
+    teamVoyageRouteAsteroid.disabled = !host;
+    teamVoyageRouteAsteroid.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageRouteVentari) {
+    teamVoyageRouteVentari.disabled = !host || lockedVentari;
+    teamVoyageRouteVentari.dataset.instantConfirm = "true";
+  }
+  [teamVoyageTimeDown, teamVoyageTimeUp, teamVoyageDifficultyDown, teamVoyageDifficultyUp].forEach(button => {
+    if (button) {
+      button.disabled = !host;
+      button.dataset.instantConfirm = "true";
+    }
+  });
+  if (teamVoyageStart) {
+    teamVoyageStart.disabled = !host || !connected || state.multiplayer.started;
+  }
+  if (teamVoyageCopyCode) {
+    teamVoyageCopyCode.disabled = !connected;
+    teamVoyageCopyCode.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageRefresh) {
+    teamVoyageRefresh.disabled = !connected;
+    teamVoyageRefresh.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageLeave) {
+    teamVoyageLeave.disabled = !connected;
+    teamVoyageLeave.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageLobbyNote) {
+    teamVoyageLobbyNote.textContent = state.multiplayer.started
+      ? "Start signal sent. The room is live and ready for the next shared-flight hookup."
+      : host
+        ? "You are the host. Route, time, and threat changes will sync to every pilot in the room."
+        : "Host controls are locked on your side. You will receive route, time, and threat updates from the host.";
+  }
+  if (teamVoyageHost) {
+    teamVoyageHost.disabled = state.multiplayer.connecting || connected;
+    teamVoyageHost.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageJoin) {
+    teamVoyageJoin.disabled = state.multiplayer.connecting || connected;
+    teamVoyageJoin.dataset.instantConfirm = "true";
+  }
+  renderTeamVoyagePlayers();
+  updateTeamVoyageBackLabel();
+}
+
+function updateTeamVoyageStateFromRoom(room) {
+  if (!room) return;
+  state.multiplayer.roomCode = String(room.code || state.multiplayer.roomCode || "").toUpperCase();
+  state.multiplayer.hostId = room.hostId || null;
+  state.multiplayer.players = Array.isArray(room.players) ? room.players : [];
+  state.multiplayer.started = Boolean(room.started);
+  state.multiplayer.lobbySettings = {
+    route: room.settings?.route === "ventariSystem" ? "ventariSystem" : "asteroidBelt",
+    difficulty: clamp(Math.round(room.settings?.difficulty || 1), 1, 5),
+    timerMinutes: clamp(Math.round(room.settings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
+  };
+  renderTeamVoyageLobby();
+}
+
+async function fetchTeamVoyageJson(path, options = {}) {
+  const serverUrl = normalizeServerUrl(state.multiplayer.serverUrl);
+  if (!serverUrl) {
+    throw new Error("Enter your Render server URL first.");
+  }
+  const response = await fetch(multiplayerHttpUrl(serverUrl, path), {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error || `Request failed (${response.status}).`);
+  }
+  return payload;
+}
+
+function closeTeamVoyageSocket(message = "", preserveStatus = false) {
+  const socket = state.multiplayer.socket;
+  state.multiplayer.manualClose = true;
+  if (socket) {
+    try {
+      socket.close();
+    } catch {}
+  }
+  state.multiplayer.socket = null;
+  state.multiplayer.connected = false;
+  state.multiplayer.connecting = false;
+  state.multiplayer.playerId = null;
+  state.multiplayer.hostId = null;
+  state.multiplayer.players = [];
+  state.multiplayer.roomCode = "";
+  state.multiplayer.started = false;
+  renderTeamVoyageLobby();
+  if (message && !preserveStatus) {
+    setTeamVoyageStatus(message);
+  }
+}
+
+function connectTeamVoyageSocket(roomCode) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(multiplayerWsUrl(state.multiplayer.serverUrl, roomCode, state.multiplayer.playerName));
+    let resolved = false;
+    state.multiplayer.socket = socket;
+    socket.addEventListener("open", () => {
+      state.multiplayer.connecting = false;
+      setTeamVoyageStatus(`Room ${String(roomCode).toUpperCase()} link established.`);
+    });
+    socket.addEventListener("message", event => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === "welcome") {
+        state.multiplayer.connected = true;
+        state.multiplayer.playerId = message.playerId || null;
+        updateTeamVoyageStateFromRoom(message.room);
+        renderTeamVoyageLobby();
+        if (!resolved) {
+          resolved = true;
+          resolve(message.room);
+        }
+        return;
+      }
+      if (message.type === "room_update") {
+        updateTeamVoyageStateFromRoom(message.room);
+        setTeamVoyageStatus(`Room ${state.multiplayer.roomCode} synced. ${state.multiplayer.players.length} pilot${state.multiplayer.players.length === 1 ? "" : "s"} linked.`);
+        return;
+      }
+      if (message.type === "game_started") {
+        updateTeamVoyageStateFromRoom(message.room);
+        setTeamVoyageStatus("Start signal received. Team Voyage gameplay sync is the next hookup step.");
+        return;
+      }
+      if (message.type === "error") {
+        setTeamVoyageStatus(message.message || "Multiplayer server error.");
+        if (!resolved) {
+          resolved = true;
+          reject(new Error(message.message || "Multiplayer server error."));
+        }
+      }
+    });
+    socket.addEventListener("close", () => {
+      const intentional = state.multiplayer.manualClose;
+      state.multiplayer.manualClose = false;
+      state.multiplayer.socket = null;
+      state.multiplayer.connected = false;
+      state.multiplayer.connecting = false;
+      state.multiplayer.playerId = null;
+      state.multiplayer.hostId = null;
+      state.multiplayer.players = [];
+      state.multiplayer.started = false;
+      renderTeamVoyageLobby();
+      if (!intentional) {
+        setTeamVoyageStatus("Lobby link closed.");
+      }
+      if (!resolved) {
+        resolved = true;
+        reject(new Error("Lobby link closed before the connection finished."));
+      }
+    });
+    socket.addEventListener("error", () => {
+      if (!resolved) {
+        resolved = true;
+        reject(new Error("Could not reach the multiplayer server."));
+      }
+    });
+  });
+}
+
+async function hostTeamVoyage() {
+  if (state.multiplayer.connecting || teamVoyageConnected()) return;
+  state.multiplayer.serverUrl = normalizeServerUrl(teamVoyageServerUrl?.value || state.multiplayer.serverUrl);
+  state.multiplayer.playerName = String(teamVoyagePlayerName?.value || state.multiplayer.playerName || "Pilot").trim().slice(0, 24) || "Pilot";
+  persistTeamVoyagePreferences();
+  renderTeamVoyageLobby();
+  state.multiplayer.connecting = true;
+  setTeamVoyageStatus("Creating lobby...");
+  try {
+    const room = await fetchTeamVoyageJson("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify({ settings: currentTeamVoyageSettings() }),
+    });
+    state.multiplayer.joinCode = room.code || "";
+    if (teamVoyageRoomInput) {
+      teamVoyageRoomInput.value = room.code || "";
+    }
+    await connectTeamVoyageSocket(room.code);
+    setTeamVoyageStatus(`Room ${room.code} ready. Share the code with your wing pilot.`);
+  } catch (error) {
+    state.multiplayer.connecting = false;
+    setTeamVoyageStatus(error.message || "Could not create the room.");
+    renderTeamVoyageLobby();
+  }
+}
+
+async function joinTeamVoyage() {
+  if (state.multiplayer.connecting || teamVoyageConnected()) return;
+  state.multiplayer.serverUrl = normalizeServerUrl(teamVoyageServerUrl?.value || state.multiplayer.serverUrl);
+  state.multiplayer.playerName = String(teamVoyagePlayerName?.value || state.multiplayer.playerName || "Pilot").trim().slice(0, 24) || "Pilot";
+  state.multiplayer.joinCode = String(teamVoyageRoomInput?.value || state.multiplayer.joinCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+  syncTeamVoyageFormState();
+  persistTeamVoyagePreferences();
+  if (!state.multiplayer.joinCode) {
+    setTeamVoyageStatus("Enter a room code before joining.");
+    return;
+  }
+  state.multiplayer.connecting = true;
+  setTeamVoyageStatus(`Joining room ${state.multiplayer.joinCode}...`);
+  renderTeamVoyageLobby();
+  try {
+    await fetchTeamVoyageJson(`/api/rooms/${state.multiplayer.joinCode}/join`, { method: "POST" });
+    await connectTeamVoyageSocket(state.multiplayer.joinCode);
+    setTeamVoyageStatus(`Joined room ${state.multiplayer.joinCode}. Awaiting host instructions.`);
+  } catch (error) {
+    state.multiplayer.connecting = false;
+    setTeamVoyageStatus(error.message || "Could not join that room.");
+    renderTeamVoyageLobby();
+  }
+}
+
+async function refreshTeamVoyageLobby() {
+  if (!teamVoyageConnected()) return;
+  try {
+    const room = await fetchTeamVoyageJson(`/api/rooms/${state.multiplayer.roomCode}`);
+    updateTeamVoyageStateFromRoom(room);
+    setTeamVoyageStatus(`Room ${state.multiplayer.roomCode} refreshed.`);
+  } catch (error) {
+    setTeamVoyageStatus(error.message || "Could not refresh the lobby.");
+  }
+}
+
+function leaveTeamVoyageLobby(message = "Lobby link closed.") {
+  closeTeamVoyageSocket(message);
+  state.multiplayer.lobbySettings = {
+    route: state.runConfig.voyageId || "asteroidBelt",
+    difficulty: clamp(Math.round(state.runConfig.difficulty || 1), 1, 5),
+    timerMinutes: Math.max(5, Math.round(getRunGoalTime() / 60)),
+  };
+  renderTeamVoyageLobby();
+}
+
+function sendTeamVoyageSettings() {
+  if (!teamVoyageConnected() || !teamVoyageIsHost() || !state.multiplayer.socket) return;
+  state.multiplayer.socket.send(JSON.stringify({
+    type: "update_settings",
+    settings: currentTeamVoyageSettings(),
+  }));
+}
+
+function setTeamVoyageRoute(route) {
+  if (!teamVoyageIsHost()) return;
+  if (route === "ventariSystem" && !ventariSystemUnlocked()) {
+    setTeamVoyageStatus(`Ventari System locked. ${ventariUnlockRequirementText()}`);
+    return;
+  }
+  state.multiplayer.lobbySettings.route = route === "ventariSystem" ? "ventariSystem" : "asteroidBelt";
+  renderTeamVoyageLobby();
+  sendTeamVoyageSettings();
+}
+
+function adjustTeamVoyageMinutes(delta) {
+  if (!teamVoyageIsHost()) return;
+  const settings = currentTeamVoyageSettings();
+  state.multiplayer.lobbySettings.timerMinutes = clamp(settings.timerMinutes + delta * 5, 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5);
+  renderTeamVoyageLobby();
+  sendTeamVoyageSettings();
+}
+
+function adjustTeamVoyageDifficulty(delta) {
+  if (!teamVoyageIsHost()) return;
+  const settings = currentTeamVoyageSettings();
+  state.multiplayer.lobbySettings.difficulty = clamp(settings.difficulty + delta, 1, 5);
+  renderTeamVoyageLobby();
+  sendTeamVoyageSettings();
+}
+
+function startTeamVoyageLobby() {
+  if (!teamVoyageConnected() || !teamVoyageIsHost() || !state.multiplayer.socket) return;
+  state.multiplayer.socket.send(JSON.stringify({ type: "start_game" }));
+  setTeamVoyageStatus("Start signal sent to the room.");
+}
+
+async function copyTeamVoyageCode() {
+  if (!teamVoyageConnected() || !state.multiplayer.roomCode) return;
+  try {
+    await navigator.clipboard.writeText(state.multiplayer.roomCode);
+    setTeamVoyageStatus(`Room code ${state.multiplayer.roomCode} copied.`);
+  } catch {
+    setTeamVoyageStatus(`Room code: ${state.multiplayer.roomCode}`);
+  }
+}
+
+function handleTeamVoyageBack() {
+  if (teamVoyageConnected()) {
+    leaveTeamVoyageLobby("Lobby link closed.");
+    syncTeamVoyageFormState();
+    state.gamepad.menuIndex = 0;
+    syncGamepadFocus();
+    return true;
+  }
+  closeTeamVoyageMenu();
+  return true;
+}
+
 function showMainMenu(message = "Select a command to continue.") {
   setMainMenuStatus(message);
-  setTeamVoyageStatus("Co-op frontend menu ready. Next step is wiring the room server and lobby code flow.");
+  setTeamVoyageStatus("Enter your Render server URL, then host a room or join one by code.");
   clearMenuConfirmHold();
   mainMenuScreen?.classList.remove("hidden");
   mainMenuSettingsMenu?.classList.add("hidden");
@@ -5986,6 +6464,8 @@ function openTeamVoyageMenu() {
   keepHubAmbienceAlive();
   mainMenuSettingsMenu?.classList.add("hidden");
   teamVoyageMenu?.classList.remove("hidden");
+  syncTeamVoyageFormState();
+  renderTeamVoyageLobby();
   state.gamepad.menuIndex = 0;
   syncGamepadFocus();
 }
@@ -5993,15 +6473,9 @@ function openTeamVoyageMenu() {
 function closeTeamVoyageMenu() {
   keepHubAmbienceAlive();
   teamVoyageMenu?.classList.add("hidden");
+  renderTeamVoyageLobby();
   state.gamepad.menuIndex = 0;
   syncGamepadFocus();
-}
-
-function notifyTeamVoyageAction(action) {
-  const message = action === "host"
-    ? "Host Voyage selected. Next step is wiring this button to create a room code from your multiplayer server."
-    : "Join Voyage selected. Next step is wiring this button to accept a room code and join a live lobby.";
-  setTeamVoyageStatus(message);
 }
 
 function notifyMainMenuLocked(feature, detail) {
@@ -6284,7 +6758,7 @@ function purchaseVoyageUpgrade(choice) {
 function handleMenuBack() {
   clearMenuConfirmHold();
   if (teamVoyageMenu && !teamVoyageMenu.classList.contains("hidden")) {
-    closeTeamVoyageMenu();
+    handleTeamVoyageBack();
     return true;
   }
   if (mainMenuSettingsMenu && !mainMenuSettingsMenu.classList.contains("hidden")) {
@@ -11746,15 +12220,80 @@ mainMenuSettingsBack?.addEventListener("click", () => {
 });
 
 teamVoyageBack?.addEventListener("click", () => {
-  closeTeamVoyageMenu();
+  handleTeamVoyageBack();
 });
 
 teamVoyageHost?.addEventListener("click", () => {
-  notifyTeamVoyageAction("host");
+  hostTeamVoyage();
 });
 
 teamVoyageJoin?.addEventListener("click", () => {
-  notifyTeamVoyageAction("join");
+  joinTeamVoyage();
+});
+
+teamVoyageServerUrl?.addEventListener("input", event => {
+  state.multiplayer.serverUrl = normalizeServerUrl(event.target.value);
+  persistTeamVoyagePreferences();
+});
+
+teamVoyagePlayerName?.addEventListener("input", event => {
+  state.multiplayer.playerName = String(event.target.value || "Pilot").trim().slice(0, 24) || "Pilot";
+  persistTeamVoyagePreferences();
+});
+
+teamVoyageRoomInput?.addEventListener("input", event => {
+  state.multiplayer.joinCode = String(event.target.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+  event.target.value = state.multiplayer.joinCode;
+});
+
+teamVoyageRoomInput?.addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    joinTeamVoyage();
+  }
+});
+
+teamVoyageCopyCode?.addEventListener("click", () => {
+  copyTeamVoyageCode();
+});
+
+teamVoyageRefresh?.addEventListener("click", () => {
+  refreshTeamVoyageLobby();
+});
+
+teamVoyageLeave?.addEventListener("click", () => {
+  leaveTeamVoyageLobby("Lobby link closed.");
+  syncTeamVoyageFormState();
+  state.gamepad.menuIndex = 0;
+  syncGamepadFocus();
+});
+
+teamVoyageRouteAsteroid?.addEventListener("click", () => {
+  setTeamVoyageRoute("asteroidBelt");
+});
+
+teamVoyageRouteVentari?.addEventListener("click", () => {
+  setTeamVoyageRoute("ventariSystem");
+});
+
+bindDiscretePress(teamVoyageTimeDown, () => {
+  adjustTeamVoyageMinutes(-1);
+});
+
+bindDiscretePress(teamVoyageTimeUp, () => {
+  adjustTeamVoyageMinutes(1);
+});
+
+bindDiscretePress(teamVoyageDifficultyDown, () => {
+  adjustTeamVoyageDifficulty(-1);
+});
+
+bindDiscretePress(teamVoyageDifficultyUp, () => {
+  adjustTeamVoyageDifficulty(1);
+});
+
+teamVoyageStart?.addEventListener("click", () => {
+  startTeamVoyageLobby();
 });
 
 mainMenuFullscreen?.addEventListener("click", () => {
@@ -11929,14 +12468,26 @@ runSummaryClose.addEventListener("click", () => {
   closeRunSummary();
 });
 
+window.addEventListener("beforeunload", () => {
+  if (state.multiplayer?.socket) {
+    state.multiplayer.manualClose = true;
+    try {
+      state.multiplayer.socket.close();
+    } catch {}
+  }
+});
+
 state.meta = loadMetaProgression();
 state.settings = {
   ...state.settings,
   ...(state.meta?.settings || {}),
 };
+readTeamVoyagePreferences();
 setupMusicSystem();
 setupSfxSystem();
 renderMetaUpgrades();
+syncTeamVoyageFormState();
+renderTeamVoyageLobby();
 resizeGameViewport();
 resetGame();
 showMainMenu("Select a command to continue.");

@@ -207,17 +207,93 @@
         <button id="team-voyage-back" class="hud-action-button hangar-submenu-back" type="button">Back</button>
       </div>
       <p class="hangar-copy">Create a co-op room, share the code, and sync lobby settings through your Render multiplayer server.</p>
-      <div class="team-voyage-grid">
-        <button id="team-voyage-host" class="primary-button main-menu-action-button team-voyage-option" type="button">
+      <div class="team-voyage-grid hidden">
+        <button id="team-voyage-host-legacy" class="primary-button main-menu-action-button team-voyage-option" type="button">
           <strong>Host Voyage</strong>
           <span>Create a co-op lobby and generate a room code for another player.</span>
         </button>
-        <button id="team-voyage-join" class="primary-button main-menu-action-button team-voyage-option" type="button">
+        <button id="team-voyage-join-legacy" class="primary-button main-menu-action-button team-voyage-option" type="button">
           <strong>Join Voyage</strong>
           <span>Join another pilot’s lobby with a room code once the server is connected.</span>
         </button>
       </div>
-      <p id="team-voyage-status" class="main-menu-copy team-voyage-status">Co-op frontend menu ready. Next step is wiring the room server and lobby code flow.</p>
+      <div class="team-voyage-form-grid">
+        <label class="team-voyage-field">
+          <span>Server URL</span>
+          <input id="team-voyage-server-url" type="text" placeholder="https://your-render-service.onrender.com" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="team-voyage-field">
+          <span>Pilot Callsign</span>
+          <input id="team-voyage-player-name" type="text" maxlength="24" placeholder="Pilot" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="team-voyage-field team-voyage-room-field">
+          <span>Room Code</span>
+          <input id="team-voyage-room-input" type="text" maxlength="8" placeholder="ABCD" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <div class="team-voyage-grid">
+        <button id="team-voyage-host" class="primary-button main-menu-action-button team-voyage-option" type="button">
+          <strong>Host Voyage</strong>
+          <span>Create a lobby, generate a room code, and open the co-op staging room.</span>
+        </button>
+        <button id="team-voyage-join" class="primary-button main-menu-action-button team-voyage-option" type="button">
+          <strong>Join Voyage</strong>
+          <span>Enter a room code and connect to another pilot's live lobby.</span>
+        </button>
+      </div>
+      <section id="team-voyage-lobby" class="team-voyage-lobby hidden">
+        <div class="team-voyage-lobby-head">
+          <div>
+            <p class="eyebrow">Live Lobby</p>
+            <h3>Room <strong id="team-voyage-room-code">----</strong></h3>
+          </div>
+          <div class="team-voyage-lobby-actions-inline">
+            <button id="team-voyage-copy-code" class="hud-action-button" type="button">Copy Code</button>
+            <button id="team-voyage-refresh" class="hud-action-button" type="button">Refresh</button>
+            <button id="team-voyage-leave" class="hud-action-button" type="button">Leave Lobby</button>
+          </div>
+        </div>
+        <div class="team-voyage-lobby-grid">
+          <div class="team-voyage-lobby-panel">
+            <p class="eyebrow">Pilots Connected</p>
+            <div id="team-voyage-player-list" class="team-voyage-player-list"></div>
+          </div>
+          <div class="team-voyage-lobby-panel">
+            <p class="eyebrow">Lobby Settings</p>
+            <div class="team-voyage-lobby-controls">
+              <div class="team-voyage-setting-block">
+                <span class="team-voyage-setting-label">Route</span>
+                <div class="team-voyage-route-buttons">
+                  <button id="team-voyage-route-asteroid" class="hangar-voyage-button team-voyage-route-button selected" type="button">Asteroid Belt<span>Threat I</span></button>
+                  <button id="team-voyage-route-ventari" class="hangar-voyage-button team-voyage-route-button" type="button">Ventari System<span>Threat II</span></button>
+                </div>
+              </div>
+              <div class="team-voyage-setting-row">
+                <span class="team-voyage-setting-label">Voyage Length</span>
+                <div class="hangar-stepper">
+                  <button id="team-voyage-time-down" class="hud-action-button hangar-mini-button" type="button">-5m</button>
+                  <strong id="team-voyage-time-readout">05:00</strong>
+                  <button id="team-voyage-time-up" class="hud-action-button hangar-mini-button" type="button">+5m</button>
+                </div>
+              </div>
+              <div class="team-voyage-setting-row">
+                <span class="team-voyage-setting-label">Threat Level</span>
+                <div class="hangar-stepper">
+                  <button id="team-voyage-difficulty-down" class="hud-action-button hangar-mini-button" type="button">-1</button>
+                  <strong id="team-voyage-difficulty-readout">Normal</strong>
+                  <button id="team-voyage-difficulty-up" class="hud-action-button hangar-mini-button" type="button">+1</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="team-voyage-lobby-footer">
+          <button id="team-voyage-start" class="primary-button team-voyage-start-button" type="button">Start Team Voyage</button>
+          <p id="team-voyage-lobby-note" class="hangar-copy">Lobby link established. Host route, time, and threat changes will sync through the room server.</p>
+        </div>
+      </section>
+      <p id="team-voyage-status" class="main-menu-copy team-voyage-status">Enter your Render server URL, then host a room or join one by code.</p>
+      <p id="team-voyage-status-legacy" class="main-menu-copy team-voyage-status hidden">Co-op frontend menu ready. Next step is wiring the room server and lobby code flow.</p>
     </div>
   </div>
 

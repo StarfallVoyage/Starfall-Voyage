@@ -5065,11 +5065,15 @@ function setupMusicSystem() {
     new Audio("freesound_community-space-ship-bridge-loop-104525.mp3"),
     new Audio("freesound_community-space-ship-bridge-loop-104525.mp3"),
   ];
+  const lobbyTrack = new Audio("nikitakondrashev-space-440026.mp3");
   for (const track of hubTracks) {
     track.preload = "auto";
     track.volume = 0;
     track.loop = false;
   }
+  lobbyTrack.preload = "auto";
+  lobbyTrack.volume = 0;
+  lobbyTrack.loop = true;
   for (const track of runTracks) {
     track.preload = "auto";
     track.volume = 0;
@@ -5082,11 +5086,13 @@ function setupMusicSystem() {
     hubActive: 0,
     hubCrossfadeStarted: false,
     hubFadeSeconds: 1.8,
+    lobbyTrack,
     runTracks,
     deathTrack,
     active: 0,
     mode: "hub",
     hubTargetVolume: 0.34,
+    lobbyTargetVolume: 0.34,
     runTargetVolume: 0.42,
     deathTargetVolume: 0.5,
     deathFadeSeconds: 1.2,
@@ -5197,10 +5203,14 @@ function applyAudioSettings() {
 
   if (state.music) {
     state.music.hubTargetVolume = 0.34 * state.settings.musicVolume;
+    state.music.lobbyTargetVolume = 0.34 * state.settings.musicVolume;
     state.music.runTargetVolume = 0.42 * state.settings.musicVolume;
     state.music.deathTargetVolume = 0.5 * state.settings.musicVolume;
     for (const track of state.music.hubTracks) {
       track.volume = Math.min(track.volume, state.music.hubTargetVolume);
+    }
+    if (state.music.lobbyTrack) {
+      state.music.lobbyTrack.volume = Math.min(state.music.lobbyTrack.volume, state.music.lobbyTargetVolume);
     }
     for (const track of state.music.runTracks) {
       track.volume = Math.min(track.volume, state.music.runTargetVolume);
@@ -5287,6 +5297,48 @@ function tickMusic(dt) {
         }
       }
     }
+    if (music.lobbyTrack && !music.lobbyTrack.paused) {
+      music.lobbyTrack.volume = Math.max(0, music.lobbyTrack.volume - dt * 0.5);
+      if (music.lobbyTrack.volume <= 0.01) {
+        music.lobbyTrack.pause();
+        music.lobbyTrack.currentTime = 0;
+      }
+    }
+    return;
+  }
+
+  if (music.mode === "lobby") {
+    if (state.audioStarted && music.lobbyTrack?.paused) {
+      keepLobbyAmbienceAlive();
+    }
+    if (music.lobbyTrack && !music.lobbyTrack.paused) {
+      music.lobbyTrack.volume = Math.min(music.lobbyTargetVolume, music.lobbyTrack.volume + dt * 0.4);
+    }
+    for (const hubTrack of music.hubTracks) {
+      if (!hubTrack.paused) {
+        hubTrack.volume = Math.max(0, hubTrack.volume - dt * 0.5);
+        if (hubTrack.volume <= 0.01) {
+          hubTrack.pause();
+          hubTrack.currentTime = 0;
+        }
+      }
+    }
+    for (const track of music.runTracks) {
+      if (!track.paused) {
+        track.volume = Math.max(0, track.volume - dt * 0.5);
+        if (track.volume <= 0.01) {
+          track.pause();
+          track.currentTime = 0;
+        }
+      }
+    }
+    if (music.deathTrack && !music.deathTrack.paused) {
+      music.deathTrack.volume = Math.max(0, music.deathTrack.volume - dt * 0.6);
+      if (music.deathTrack.volume <= 0.01) {
+        music.deathTrack.pause();
+        music.deathTrack.currentTime = 0;
+      }
+    }
     return;
   }
 
@@ -5310,6 +5362,13 @@ function tickMusic(dt) {
         }
       }
     }
+    if (music.lobbyTrack && !music.lobbyTrack.paused) {
+      music.lobbyTrack.volume = Math.max(0, music.lobbyTrack.volume - fadeDelta * music.lobbyTargetVolume);
+      if (music.lobbyTrack.volume <= 0.01) {
+        music.lobbyTrack.pause();
+        music.lobbyTrack.currentTime = 0;
+      }
+    }
     if (music.deathTrack && !music.deathTrack.ended) {
       if (music.deathTrack.paused) {
         music.deathTrack.play().catch(() => {});
@@ -5326,6 +5385,14 @@ function tickMusic(dt) {
   const nextIndex = (music.active + 1) % music.runTracks.length;
   const next = music.runTracks[nextIndex];
   const fadeDelta = dt / music.fadeSeconds;
+
+  if (music.lobbyTrack && !music.lobbyTrack.paused) {
+    music.lobbyTrack.volume = Math.max(0, music.lobbyTrack.volume - dt * 0.5);
+    if (music.lobbyTrack.volume <= 0.01) {
+      music.lobbyTrack.pause();
+      music.lobbyTrack.currentTime = 0;
+    }
+  }
 
   if (
     current.duration &&
@@ -5355,8 +5422,15 @@ function tickMusic(dt) {
 function ensureMusicStarted() {
   if (state.audioStarted || !state.music) return;
   state.audioStarted = true;
-  playHubAmbience(true);
-  if (state.music.hubTracks.every(track => track.paused)) {
+  if (state.music.mode === "lobby") {
+    playLobbyAmbience(true);
+  } else {
+    playHubAmbience(true);
+  }
+  const menuTrackActive = state.music.mode === "lobby"
+    ? !state.music.lobbyTrack?.paused
+    : state.music.hubTracks.some(track => !track.paused);
+  if (!menuTrackActive) {
     state.audioStarted = false;
   }
   primeSfxPool();
@@ -5432,6 +5506,19 @@ function playHubAmbience(reset = false) {
   }
 }
 
+function playLobbyAmbience(reset = false) {
+  if (!state.audioStarted || !state.music?.lobbyTrack) return;
+  const { lobbyTrack } = state.music;
+  if (reset) {
+    lobbyTrack.pause();
+    lobbyTrack.currentTime = 0;
+    lobbyTrack.volume = 0;
+  }
+  if (lobbyTrack.paused) {
+    lobbyTrack.play().catch(() => {});
+  }
+}
+
 function keepHubAmbienceAlive() {
   if (!state.audioStarted || !state.music || state.music.mode !== "hub") return;
   playHubAmbience();
@@ -5440,6 +5527,15 @@ function keepHubAmbienceAlive() {
   currentHub.volume = Math.max(
     currentHub.volume,
     Math.min(state.music.hubTargetVolume, 0.05 + state.music.hubTargetVolume * 0.12)
+  );
+}
+
+function keepLobbyAmbienceAlive() {
+  if (!state.audioStarted || !state.music?.lobbyTrack || state.music.mode !== "lobby") return;
+  playLobbyAmbience();
+  state.music.lobbyTrack.volume = Math.max(
+    state.music.lobbyTrack.volume,
+    Math.min(state.music.lobbyTargetVolume, 0.05 + state.music.lobbyTargetVolume * 0.12)
   );
 }
 
@@ -5454,6 +5550,10 @@ function switchMusicMode(mode) {
   if (!state.audioStarted) return;
   if (mode === "hub") {
     playHubAmbience();
+  } else if (mode === "lobby") {
+    state.music.crossfadeStarted = false;
+    state.music.hubCrossfadeStarted = false;
+    playLobbyAmbience();
   } else if (mode === "death") {
     state.music.crossfadeStarted = false;
     state.music.hubCrossfadeStarted = false;
@@ -5557,6 +5657,8 @@ function unlockAudio() {
   ensureUiAudioContext();
   if (state.audioStarted && state.music?.mode === "hub") {
     playHubAmbience();
+  } else if (state.audioStarted && state.music?.mode === "lobby") {
+    playLobbyAmbience();
   }
 }
 
@@ -6125,16 +6227,14 @@ function setMainMenuStatus(message) {
 
 function setTeamVoyageStatus(message) {
   if (teamVoyageStatus) {
-    teamVoyageStatus.textContent = message;
+    const text = String(message || "").trim();
+    teamVoyageStatus.textContent = text;
+    teamVoyageStatus.classList.toggle("hidden", !text);
   }
 }
 
 function defaultMultiplayerServerUrl() {
-  const host = window.location.hostname;
-  if (host === "localhost" || host === "127.0.0.1") {
-    return "http://localhost:10000";
-  }
-  return "";
+  return "https://starfall-voyage-v69j.onrender.com";
 }
 
 function normalizeServerUrl(value) {
@@ -7443,7 +7543,7 @@ function showMainMenu(message = "Select a command to continue.") {
     switchMetaProfile("solo");
   }
   setMainMenuStatus(message);
-  setTeamVoyageStatus("Enter your Render server URL, then host a room or join one by code.");
+  setTeamVoyageStatus("");
   clearMenuConfirmHold();
   mainMenuScreen?.classList.remove("hidden");
   mainMenuSettingsMenu?.classList.add("hidden");
@@ -7489,7 +7589,8 @@ function closeMainMenuSettingsMenu() {
 function openTeamVoyageMenu() {
   if (state.mode !== "mainmenu") return;
   switchMetaProfile("coop");
-  keepHubAmbienceAlive();
+  switchMusicMode("lobby");
+  keepLobbyAmbienceAlive();
   mainMenuSettingsMenu?.classList.add("hidden");
   teamVoyageMenu?.classList.remove("hidden");
   syncTeamVoyageFormState();
@@ -7499,6 +7600,7 @@ function openTeamVoyageMenu() {
 }
 
 function closeTeamVoyageMenu() {
+  switchMusicMode("hub");
   keepHubAmbienceAlive();
   teamVoyageMenu?.classList.add("hidden");
   renderTeamVoyageLobby();

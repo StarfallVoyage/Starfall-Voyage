@@ -178,9 +178,12 @@ const WEAPON_SWITCH_COOLDOWN = 1;
 const WEAPON_SWITCH_FIRE_DELAY = 0.16;
 const MULTIPLAYER_INPUT_INTERVAL = 1 / 60;
 const MULTIPLAYER_SNAPSHOT_INTERVAL = 1 / 60;
+const MULTIPLAYER_MENU_SNAPSHOT_INTERVAL = 1 / 12;
 const MULTIPLAYER_SYNC_RANGE = 960;
 const MULTIPLAYER_SYNC_PROJECTILE_CAP = 90;
 const MULTIPLAYER_SYNC_ENEMY_CAP = 120;
+const MULTIPLAYER_MENU_SYNC_PROJECTILE_CAP = 28;
+const MULTIPLAYER_MENU_SYNC_ENEMY_CAP = 72;
 const MULTIPLAYER_REVIVE_BASE_COST = 100;
 const MULTIPLAYER_REVIVE_HOLD_TIME = 1;
 const MULTIPLAYER_REVIVE_RANGE = 52;
@@ -3885,11 +3888,11 @@ function broadcastSessionMode(mode) {
   });
 }
 
-function setPendingSessionMode(mode) {
+function setPendingSessionMode(mode, durationMs = 1200) {
   if (!multiplayerRunClient()) return;
   const runtime = multiplayerRuntime();
   runtime.pendingSessionMode = mode;
-  runtime.pendingSessionModeUntil = performance.now() + 1200;
+  runtime.pendingSessionModeUntil = performance.now() + durationMs;
 }
 
 function clearPendingSessionMode(mode = null) {
@@ -6534,6 +6537,9 @@ function serializeMultiplayerPilot(id, pilot, extra = {}) {
 }
 
 function snapshotWorldState() {
+  const menuSnapshot = state.mode !== "playing";
+  const enemyCap = menuSnapshot ? MULTIPLAYER_MENU_SYNC_ENEMY_CAP : MULTIPLAYER_SYNC_ENEMY_CAP;
+  const projectileCap = menuSnapshot ? MULTIPLAYER_MENU_SYNC_PROJECTILE_CAP : MULTIPLAYER_SYNC_PROJECTILE_CAP;
   const pilots = [];
   const localName = currentTeamVoyagePlayerRoster().find(player => player.id === state.multiplayer.playerId)?.name || state.multiplayer.playerName;
   pilots.push(serializeMultiplayerPilot(state.multiplayer.playerId || "host", state.player, { name: localName, local: true }));
@@ -6566,7 +6572,7 @@ function snapshotWorldState() {
       explodesOnProximity: Boolean(enemy.explodesOnProximity),
       detonationRadius: enemy.detonationRadius || 0,
     });
-    if (enemies.length >= MULTIPLAYER_SYNC_ENEMY_CAP) break;
+    if (enemies.length >= enemyCap) break;
   }
 
   const projectiles = [];
@@ -6583,7 +6589,7 @@ function snapshotWorldState() {
       vy: shot.vy || 0,
       fadeAlpha: shot.fadeAlpha ?? 1,
     });
-    if (projectiles.length >= MULTIPLAYER_SYNC_PROJECTILE_CAP) break;
+    if (projectiles.length >= projectileCap) break;
   }
 
   return {
@@ -7127,8 +7133,9 @@ function sendMultiplayerSnapshot(dt) {
   if (!multiplayerRunHost() || !["playing", "paused", "voyageupgrades"].includes(state.mode)) return;
   const runtime = multiplayerRuntime();
   runtime.snapshotClock += dt;
-  if (runtime.snapshotClock < MULTIPLAYER_SNAPSHOT_INTERVAL) return;
-  runtime.snapshotClock = 0;
+  const snapshotInterval = state.mode === "playing" ? MULTIPLAYER_SNAPSHOT_INTERVAL : MULTIPLAYER_MENU_SNAPSHOT_INTERVAL;
+  if (runtime.snapshotClock < snapshotInterval) return;
+  runtime.snapshotClock = Math.max(0, runtime.snapshotClock - snapshotInterval);
   sendMultiplayerClientEvent({
     kind: "run_snapshot",
     snapshot: snapshotWorldState(),
@@ -7172,7 +7179,7 @@ function handleMultiplayerClientEvent(from, payload) {
       return;
     }
     if (multiplayerRunClient()) {
-      clearPendingSessionMode(nextMode);
+      setPendingSessionMode(nextMode, 1800);
       applySharedVoyageMenuState(nextMode);
     }
     return;
@@ -7436,45 +7443,54 @@ function connectTeamVoyageSocket(roomCode) {
       } catch {
         return;
       }
-      if (message.type === "welcome") {
-        state.multiplayer.connected = true;
-        state.multiplayer.playerId = message.playerId || null;
-        updateTeamVoyageStateFromRoom(message.room);
-        sendMultiplayerClientEvent({
-          kind: "profile_sync",
-          profile: currentMultiplayerProfilePayload(),
-        });
-        renderTeamVoyageLobby();
-        if (!resolved) {
-          resolved = true;
-          resolve(message.room);
+      try {
+        if (message.type === "welcome") {
+          state.multiplayer.connected = true;
+          state.multiplayer.playerId = message.playerId || null;
+          updateTeamVoyageStateFromRoom(message.room);
+          sendMultiplayerClientEvent({
+            kind: "profile_sync",
+            profile: currentMultiplayerProfilePayload(),
+          });
+          renderTeamVoyageLobby();
+          if (!resolved) {
+            resolved = true;
+            resolve(message.room);
+          }
+          if (message.room?.started && !multiplayerRunActive()) {
+            setTeamVoyageStatus("Live room detected. Linking synchronized voyage.");
+            launchTeamVoyageRun(message.room);
+          }
+          return;
         }
-        if (message.room?.started && !multiplayerRunActive()) {
-          setTeamVoyageStatus("Live room detected. Linking synchronized voyage.");
+        if (message.type === "room_update") {
+          updateTeamVoyageStateFromRoom(message.room);
+          setTeamVoyageStatus(`Room ${state.multiplayer.roomCode} synced. ${state.multiplayer.players.length} pilot${state.multiplayer.players.length === 1 ? "" : "s"} linked.`);
+          return;
+        }
+        if (message.type === "client_event") {
+          handleMultiplayerClientEvent(message.from, message.payload);
+          return;
+        }
+        if (message.type === "game_started") {
+          updateTeamVoyageStateFromRoom(message.room);
+          setTeamVoyageStatus("Synchronized launch initiated.");
           launchTeamVoyageRun(message.room);
+          return;
         }
-        return;
-      }
-      if (message.type === "room_update") {
-        updateTeamVoyageStateFromRoom(message.room);
-        setTeamVoyageStatus(`Room ${state.multiplayer.roomCode} synced. ${state.multiplayer.players.length} pilot${state.multiplayer.players.length === 1 ? "" : "s"} linked.`);
-        return;
-      }
-      if (message.type === "client_event") {
-        handleMultiplayerClientEvent(message.from, message.payload);
-        return;
-      }
-      if (message.type === "game_started") {
-        updateTeamVoyageStateFromRoom(message.room);
-        setTeamVoyageStatus("Synchronized launch initiated.");
-        launchTeamVoyageRun(message.room);
-        return;
-      }
-      if (message.type === "error") {
-        setTeamVoyageStatus(message.message || "Multiplayer server error.");
+        if (message.type === "error") {
+          setTeamVoyageStatus(message.message || "Multiplayer server error.");
+          if (!resolved) {
+            resolved = true;
+            reject(new Error(message.message || "Multiplayer server error."));
+          }
+        }
+      } catch (error) {
+        console.error("Team Voyage message handling failed.", error, message);
+        setTeamVoyageStatus("Multiplayer sync hiccup detected. Waiting for the next update.");
         if (!resolved) {
           resolved = true;
-          reject(new Error(message.message || "Multiplayer server error."));
+          reject(error instanceof Error ? error : new Error("Multiplayer sync hiccup."));
         }
       }
     });
@@ -7698,8 +7714,8 @@ function closeMainMenuSettingsMenu() {
 function openTeamVoyageMenu() {
   if (state.mode !== "mainmenu") return;
   switchMetaProfile("coop");
-  switchMusicMode("lobby");
-  keepLobbyAmbienceAlive();
+  switchMusicMode("hub");
+  keepHubAmbienceAlive();
   mainMenuSettingsMenu?.classList.add("hidden");
   teamVoyageMenu?.classList.remove("hidden");
   syncTeamVoyageFormState();

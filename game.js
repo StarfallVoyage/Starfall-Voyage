@@ -3826,22 +3826,82 @@ function hidePauseOptions() {
   pauseOptions.classList.add("hidden");
 }
 
-function pauseVoyage() {
-  if (state.mode !== "playing") return;
-  state.mode = "paused";
-  openOverlay("Paused", "Catch your breath. Resume when you are ready.", "Resume");
-  overlayEndVoyage.style.display = "inline-block";
-  showPauseOptions();
-  statusText.textContent = "Flight paused.";
+function applySharedVoyageMenuState(mode) {
+  const nextMode = mode === "voyageupgrades" ? "voyageupgrades" : mode === "paused" ? "paused" : "playing";
+  if (nextMode === "paused") {
+    if (state.mode === "paused" && !overlay.classList.contains("hidden")) return;
+    voyageUpgradesMenu?.classList.add("hidden");
+    state.mode = "paused";
+    openOverlay("Paused", "Catch your breath. Resume when you are ready.", "Resume");
+    overlayEndVoyage.style.display = "inline-block";
+    showPauseOptions();
+    statusText.textContent = "Flight paused.";
+    syncGamepadFocus();
+    return;
+  }
+  if (nextMode === "voyageupgrades") {
+    if (state.mode === "voyageupgrades" && !voyageUpgradesMenu.classList.contains("hidden")) return;
+    overlay.classList.add("hidden");
+    hidePauseOptions();
+    state.mode = "voyageupgrades";
+    voyageUpgradesMenu.classList.remove("hidden");
+    renderVoyageUpgradesMenu();
+    if (voyageUpgradeGrid) {
+      voyageUpgradeGrid.scrollTop = 0;
+    }
+    const targets = gamepadMenuTargets();
+    state.gamepad.menuIndex = 0;
+    applyGamepadFocus(targets, true);
+    return;
+  }
+  if (state.mode === "playing" && overlay.classList.contains("hidden") && voyageUpgradesMenu?.classList.contains("hidden")) return;
+  voyageUpgradesMenu?.classList.add("hidden");
+  overlay.classList.add("hidden");
+  hidePauseOptions();
+  state.mode = "playing";
+  statusText.textContent = activeVoyageStatus();
+  syncHud();
   syncGamepadFocus();
 }
 
-function resumeVoyage() {
+function broadcastSessionMode(mode) {
+  if (!multiplayerRunActive()) return;
+  sendMultiplayerClientEvent({
+    kind: "session_mode",
+    mode,
+  });
+}
+
+function pauseVoyage(sync = true) {
+  if (state.mode !== "playing") return;
+  applySharedVoyageMenuState("paused");
+  if (sync) {
+    broadcastSessionMode("paused");
+  }
+}
+
+function resumeVoyage(sync = true) {
   if (state.mode !== "paused") return;
-  state.mode = "playing";
-  overlay.classList.add("hidden");
-  hidePauseOptions();
-  statusText.textContent = activeVoyageStatus();
+  applySharedVoyageMenuState("playing");
+  if (sync) {
+    broadcastSessionMode("playing");
+  }
+}
+
+function openVoyageUpgradesMenu(sync = true) {
+  if (state.mode !== "playing" || !state.player) return;
+  applySharedVoyageMenuState("voyageupgrades");
+  if (sync) {
+    broadcastSessionMode("voyageupgrades");
+  }
+}
+
+function closeVoyageUpgradesMenu(sync = true) {
+  if (!voyageUpgradeMenuActive()) return;
+  applySharedVoyageMenuState("playing");
+  if (sync) {
+    broadcastSessionMode("playing");
+  }
 }
 
 async function syncEscapeFullscreenLock() {
@@ -6524,6 +6584,9 @@ function smoothSnapshotPilot(target, dt, snapFactor = 10) {
 
 function applyWorldSnapshot(snapshot) {
   if (!multiplayerRunClient() || !snapshot) return;
+  if (["playing", "paused", "voyageupgrades"].includes(snapshot.phase || "")) {
+    applySharedVoyageMenuState(snapshot.phase);
+  }
   state.time = snapshot.time || 0;
   state.voyageProgress = snapshot.voyageProgress || 0;
   state.kills = snapshot.kills || 0;
@@ -6802,7 +6865,7 @@ function updateRemotePilots(dt) {
 }
 
 function sendMultiplayerSnapshot(dt) {
-  if (!multiplayerRunHost() || state.mode !== "playing") return;
+  if (!multiplayerRunHost() || !["playing", "paused", "voyageupgrades"].includes(state.mode)) return;
   const runtime = multiplayerRuntime();
   runtime.snapshotClock += dt;
   if (runtime.snapshotClock < MULTIPLAYER_SNAPSHOT_INTERVAL) return;
@@ -6841,6 +6904,19 @@ function rebuildRemotePilotFromProfile(id, metaProfile) {
 
 function handleMultiplayerClientEvent(from, payload) {
   if (!payload?.kind) return;
+  if (payload.kind === "session_mode") {
+    const nextMode = payload.mode === "voyageupgrades" ? "voyageupgrades" : payload.mode === "paused" ? "paused" : "playing";
+    if (multiplayerRunHost()) {
+      if (from === state.multiplayer.playerId) return;
+      applySharedVoyageMenuState(nextMode);
+      broadcastSessionMode(nextMode);
+      return;
+    }
+    if (multiplayerRunClient()) {
+      applySharedVoyageMenuState(nextMode);
+    }
+    return;
+  }
   if (payload.kind === "profile_sync" && multiplayerRunHost()) {
     const profileMeta = normalizeMetaProgression(payload.profile?.meta || payload.meta || payload.profile);
     state.multiplayer.playerProfiles[from] = profileMeta;
@@ -7620,30 +7696,6 @@ function applyVoyageUpgradeChoice(choice, player) {
       ? `${choice.title} Online`
       : `${choice.title} ${formatVersionLabel(newLevel)}`,
   };
-}
-
-function openVoyageUpgradesMenu() {
-  if (state.mode !== "playing" || !state.player) return;
-  state.mode = "voyageupgrades";
-  voyageUpgradesMenu.classList.remove("hidden");
-  renderVoyageUpgradesMenu();
-  if (voyageUpgradeGrid) {
-    voyageUpgradeGrid.scrollTop = 0;
-  }
-  const targets = gamepadMenuTargets();
-  state.gamepad.menuIndex = 0;
-  applyGamepadFocus(targets, true);
-}
-
-function closeVoyageUpgradesMenu() {
-  if (!voyageUpgradeMenuActive()) return;
-  voyageUpgradesMenu.classList.add("hidden");
-  if (state.mode === "voyageupgrades") {
-    state.mode = "playing";
-  }
-  state.gamepad.menuIndex = 0;
-  syncHud();
-  syncGamepadFocus();
 }
 
 function purchaseVoyageUpgrade(choice) {
@@ -8755,23 +8807,27 @@ function detonateHostileProjectile(shot) {
   });
   burst(shot.x, shot.y, color, 14);
 
-  if (distance(shot, state.player) > radius + state.player.radius) return;
   const elementalDamage = shot.effectType === "hack";
   const shieldDamage = shot.explosionDamage || shot.damage || 0;
   const hullDamage = shot.explosionHullDamage || shot.hullDamage || 0;
-  if (hullDamage > 0) {
-    hurtPlayerHullOnly(
-      elementalDamage ? reduceIncomingElementalDamage(hullDamage, state.player) : hullDamage,
-      shot.sourceEnemy
-    );
-  } else if (shieldDamage > 0) {
-    hurtPlayerShieldOnly(
-      elementalDamage ? reduceIncomingElementalDamage(shieldDamage, state.player) : shieldDamage,
-      shot.sourceEnemy
-    );
-  }
-  if (shot.effectType === "hack") {
-    infectPlayerWithHack(shot.effectDuration || 3.5);
+  for (const pilot of activeCombatPilots()) {
+    if (distance(shot, pilot) > radius + pilot.radius) continue;
+    if (hullDamage > 0) {
+      hurtPilotHullOnly(
+        elementalDamage ? reduceIncomingElementalDamage(hullDamage, pilot) : hullDamage,
+        shot.sourceEnemy,
+        pilot
+      );
+    } else if (shieldDamage > 0) {
+      hurtPilotShieldOnly(
+        elementalDamage ? reduceIncomingElementalDamage(shieldDamage, pilot) : shieldDamage,
+        shot.sourceEnemy,
+        pilot
+      );
+    }
+    if (shot.effectType === "hack" && localPilotEntity(pilot)) {
+      infectPlayerWithHack(shot.effectDuration || 3.5);
+    }
   }
 }
 
@@ -10332,7 +10388,7 @@ function updateProjectiles(dt) {
     } else {
       if (shot.homing) {
         const target = shot.hostile
-          ? state.player
+          ? activeCombatPilots().find(pilot => (shot.targetPilotId ? pilot.id === shot.targetPilotId : false)) || nearestCombatPilot(shot)
           : shot.target && shot.target.alive !== false
             ? shot.target
             : nearestEnemyFrom(shot, 1000);
@@ -10361,7 +10417,7 @@ function updateProjectiles(dt) {
     }
 
     if (shot.hostile) {
-      if (shot.kind === "leviathanMissile" && distance(shot, state.player) <= shot.radius + state.player.radius) {
+      if (shot.kind === "leviathanMissile" && activeCombatPilots().some(pilot => distance(shot, pilot) <= shot.radius + pilot.radius)) {
         detonateHostileProjectile(shot);
         continue;
       }
@@ -10498,8 +10554,31 @@ function triggerDamageFlash(type, amount) {
   );
 }
 
-function hurtPlayer(amount, source = null) {
-  const player = state.player;
+function activeCombatPilots() {
+  const pilots = [state.player];
+  if (multiplayerRunHost()) {
+    pilots.push(...Object.values(multiplayerRuntime().remotePilots || {}));
+  }
+  return pilots.filter(pilot => pilot && pilot.alive !== false && (pilot.hp || 0) > 0);
+}
+
+function nearestCombatPilot(entity, range = Infinity, options = {}) {
+  const candidates = activeCombatPilots().filter(pilot => {
+    if (options.exclude && pilot === options.exclude) return false;
+    if (options.requireNotInvulnerable && (pilot.invuln || 0) > 0) return false;
+    return distance(entity, pilot) <= range;
+  });
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => distance(entity, a) - distance(entity, b));
+  return candidates[0];
+}
+
+function localPilotEntity(pilot) {
+  return pilot === state.player;
+}
+
+function hurtPilot(amount, source = null, pilot = state.player) {
+  const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
@@ -10514,7 +10593,9 @@ function hurtPlayer(amount, source = null) {
     amount -= absorbed;
     totalTaken += absorbed;
     player.shieldRegenDelay = 2.4;
-    triggerDamageFlash("shield", absorbed);
+    if (localPilotEntity(player)) {
+      triggerDamageFlash("shield", absorbed);
+    }
     floatingText(player.x, player.y - 26, `-${Math.round(absorbed)} shield`, "#8af6ff", 0.7);
   }
   if (amount <= 0) {
@@ -10532,8 +10613,10 @@ function hurtPlayer(amount, source = null) {
 
   player.hp -= amount;
   totalTaken += amount;
-  state.runStats.damageTaken += amount;
-  triggerDamageFlash("hull", amount);
+  if (localPilotEntity(player)) {
+    state.runStats.damageTaken += amount;
+    triggerDamageFlash("hull", amount);
+  }
   player.invuln = 0.55;
   player.shieldRegenDelay = 2.4;
   floatingText(player.x, player.y - 26, `-${Math.round(amount)}`, "#ff8ea1", 0.8);
@@ -10560,8 +10643,14 @@ function hurtPlayer(amount, source = null) {
     floatingText(player.x, player.y - 58, "Emergency Shield", "#8af6ff", 0.7);
   }
   if (player.hp <= 0) {
-    player.hp = 0;
-    beginPlayerDeathSequence(finalizePlayerFailureRewards());
+    if (localPilotEntity(player)) {
+      player.hp = 0;
+      beginPlayerDeathSequence(finalizePlayerFailureRewards());
+    } else {
+      player.hp = 1;
+      player.invuln = Math.max(player.invuln || 0, 1.2);
+      floatingText(player.x, player.y - 42, "CRITICAL", "#ff9aa8", 0.6);
+    }
     return;
   }
 
@@ -10569,8 +10658,8 @@ function hurtPlayer(amount, source = null) {
   updateHullCriticalWarning(player);
 }
 
-function hurtPlayerShieldOnly(amount, source = null) {
-  const player = state.player;
+function hurtPilotShieldOnly(amount, source = null, pilot = state.player) {
+  const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
@@ -10589,22 +10678,26 @@ function hurtPlayerShieldOnly(amount, source = null) {
 
   const absorbed = Math.min(player.shield, amount);
   player.shield -= absorbed;
-  triggerDamageFlash("shield", absorbed);
+  if (localPilotEntity(player)) {
+    triggerDamageFlash("shield", absorbed);
+  }
   floatingText(player.x, player.y - 26, `-${Math.round(absorbed)} shield`, "#8af6ff", 0.7);
   updateShieldDepletedWarning(player);
   updateHullCriticalWarning(player);
 }
 
-function hurtPlayerHullOnly(amount, source = null) {
-  const player = state.player;
+function hurtPilotHullOnly(amount, source = null, pilot = state.player) {
+  const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
 
   amount = Math.max(1, amount * player.damageTakenMultiplier * (player.zoneDamageMultiplier || 1));
   player.hp -= amount;
-  state.runStats.damageTaken += amount;
-  triggerDamageFlash("hull", amount);
+  if (localPilotEntity(player)) {
+    state.runStats.damageTaken += amount;
+    triggerDamageFlash("hull", amount);
+  }
   player.invuln = 0.45;
   player.shieldRegenDelay = 2.4;
   floatingText(player.x, player.y - 26, `-${amount.toFixed(amount < 2 ? 1 : 0)} hp`, "#ffb56a", 0.75);
@@ -10631,13 +10724,31 @@ function hurtPlayerHullOnly(amount, source = null) {
     floatingText(player.x, player.y - 58, "Emergency Shield", "#8af6ff", 0.7);
   }
   if (player.hp <= 0) {
-    player.hp = 0;
-    beginPlayerDeathSequence(finalizePlayerFailureRewards());
+    if (localPilotEntity(player)) {
+      player.hp = 0;
+      beginPlayerDeathSequence(finalizePlayerFailureRewards());
+    } else {
+      player.hp = 1;
+      player.invuln = Math.max(player.invuln || 0, 1.2);
+      floatingText(player.x, player.y - 42, "CRITICAL", "#ff9aa8", 0.6);
+    }
     return;
   }
 
   updateShieldDepletedWarning(player);
   updateHullCriticalWarning(player);
+}
+
+function hurtPlayer(amount, source = null) {
+  hurtPilot(amount, source, state.player);
+}
+
+function hurtPlayerShieldOnly(amount, source = null) {
+  hurtPilotShieldOnly(amount, source, state.player);
+}
+
+function hurtPlayerHullOnly(amount, source = null) {
+  hurtPilotHullOnly(amount, source, state.player);
 }
 
 function detonateEnemy(enemy) {
@@ -10652,16 +10763,15 @@ function detonateEnemy(enemy) {
     color: enemy.explosionColor || enemy.color,
   });
   burst(enemy.x, enemy.y, enemy.explosionColor || enemy.color, 20);
-  if (Math.hypot(enemy.x - state.player.x, enemy.y - state.player.y) <= (enemy.explosionRadius || 100) + state.player.radius) {
-    hurtPlayer(enemy.explosionDamage || 60, enemy);
+  for (const pilot of activeCombatPilots()) {
+    if (Math.hypot(enemy.x - pilot.x, enemy.y - pilot.y) <= (enemy.explosionRadius || 100) + pilot.radius) {
+      hurtPilot(enemy.explosionDamage || 60, enemy, pilot);
+    }
   }
 }
 
 function updateEnemies(dt) {
-  const slowFieldRadius = state.player.slowFieldRadius;
-  const slowFieldMultiplier = state.player.slowFieldMultiplier;
-  let contactDamage = 0;
-  let contactSource = null;
+  const combatPilots = activeCombatPilots();
   for (const enemy of state.enemies) {
     applyEnemyVoyageScaling(enemy);
     enemy.supportSpeedMultiplier = 1;
@@ -10732,7 +10842,8 @@ function updateEnemies(dt) {
         )
         .sort((a, b) => distance(a, enemy) - distance(b, enemy))[0]
       : null;
-    const pursuitTarget = hackedTarget || state.player;
+    const pursuitTarget = hackedTarget || nearestCombatPilot(enemy);
+    if (!pursuitTarget) continue;
     const angle = Math.atan2(pursuitTarget.y - enemy.y, pursuitTarget.x - enemy.x);
     let moveX = Math.cos(angle);
     let moveY = Math.sin(angle);
@@ -10753,8 +10864,13 @@ function updateEnemies(dt) {
       speedMultiplier *= 0.55;
       enemy.slowed = true;
     }
-    if (enemy.hackTimer <= 0 && state.player.slowingField > 0 && distance(enemy, state.player) < slowFieldRadius) {
-      speedMultiplier *= slowFieldMultiplier;
+    const slowFieldPilot = enemy.hackTimer <= 0
+      ? combatPilots
+        .filter(pilot => (pilot.slowingField || 0) > 0 && distance(enemy, pilot) < (pilot.slowFieldRadius || 0))
+        .sort((a, b) => distance(enemy, a) - distance(enemy, b))[0]
+      : null;
+    if (slowFieldPilot) {
+      speedMultiplier *= slowFieldPilot.slowFieldMultiplier || 1;
       enemy.slowed = true;
     }
     if (enemy.freezeTimer > 0) {
@@ -10774,7 +10890,10 @@ function updateEnemies(dt) {
     enemy.x += moveX * enemy.speed * speedMultiplier * dt;
     enemy.y += moveY * enemy.speed * speedMultiplier * dt;
 
-    if (enemy.hackTimer <= 0 && enemy.playerSlowRadius > 0 && distance(enemy, state.player) <= enemy.playerSlowRadius + state.player.radius) {
+    const decayPilot = enemy.hackTimer <= 0 && enemy.playerSlowRadius > 0
+      ? combatPilots.find(pilot => distance(enemy, pilot) <= enemy.playerSlowRadius + pilot.radius)
+      : null;
+    if (decayPilot) {
       enemy.shield = Math.max(0, enemy.shield - enemy.selfDecayRate * 0.55 * dt);
       enemy.hp -= enemy.selfDecayRate * dt;
       if (enemy.hp <= 0) {
@@ -10817,6 +10936,7 @@ function updateEnemies(dt) {
             effectDuration: enemy.shotEffectDuration || 0,
             homing: (enemy.shotKind || "") === "leviathanMissile",
             homingTurnRate: enemy.shotHomingTurn || 0,
+            targetPilotId: pursuitTarget.id || "local",
             explodesOnExpire: (enemy.shotKind || "") === "leviathanMissile",
             explosionRadius: enemy.shotExplosionRadius || 0,
             explosionDamage: enemy.shotExplosionDamage || enemy.shotDamage || 0,
@@ -10827,7 +10947,11 @@ function updateEnemies(dt) {
       }
     }
 
-    if (enemy.hackTimer <= 0 && enemy.explodesOnProximity && distance(enemy, state.player) <= enemy.detonationRadius + state.player.radius) {
+    if (
+      enemy.hackTimer <= 0 &&
+      enemy.explodesOnProximity &&
+      combatPilots.some(pilot => distance(enemy, pilot) <= enemy.detonationRadius + pilot.radius)
+    ) {
       detonateEnemy(enemy);
       continue;
     }
@@ -10861,48 +10985,47 @@ function updateEnemies(dt) {
       continue;
     }
 
-    const bodyHit =
-      distance(enemy, state.player) <= enemy.radius + state.player.radius ||
-      segmentHitsCircle(
-        state.player.prevX ?? state.player.x,
-        state.player.prevY ?? state.player.y,
-        state.player.x,
-        state.player.y,
-        enemy.x,
-        enemy.y,
-        enemy.radius + state.player.radius
-      );
-    if (bodyHit) {
-      contactDamage += enemy.contactDamage || enemyDamageValue(enemy.type);
-      if (!contactSource) {
-        contactSource = enemy;
+    for (const pilot of combatPilots) {
+      const bodyHit =
+        distance(enemy, pilot) <= enemy.radius + pilot.radius ||
+        segmentHitsCircle(
+          pilot.prevX ?? pilot.x,
+          pilot.prevY ?? pilot.y,
+          pilot.x,
+          pilot.y,
+          enemy.x,
+          enemy.y,
+          enemy.radius + pilot.radius
+        );
+      if (bodyHit) {
+        hurtPilot(enemy.contactDamage || enemyDamageValue(enemy.type), enemy, pilot);
       }
     }
   }
 
-  if (contactDamage > 0) {
-    hurtPlayer(contactDamage, contactSource);
-  }
-
   for (const shot of state.projectiles) {
     if (!shot.hostile) continue;
-    if (distance(shot, state.player) <= shot.radius + state.player.radius) {
+    for (const pilot of combatPilots) {
+      if (distance(shot, pilot) > shot.radius + pilot.radius) continue;
       shot.life = 0;
       const elementalDamage = shot.effectType === "hack";
       if ((shot.hullDamage || 0) > 0) {
-        hurtPlayerHullOnly(
-          elementalDamage ? reduceIncomingElementalDamage(shot.hullDamage, state.player) : shot.hullDamage,
-          shot.sourceEnemy
+        hurtPilotHullOnly(
+          elementalDamage ? reduceIncomingElementalDamage(shot.hullDamage, pilot) : shot.hullDamage,
+          shot.sourceEnemy,
+          pilot
         );
       } else {
-        hurtPlayerShieldOnly(
-          elementalDamage ? reduceIncomingElementalDamage(shot.damage, state.player) : shot.damage,
-          shot.sourceEnemy
+        hurtPilotShieldOnly(
+          elementalDamage ? reduceIncomingElementalDamage(shot.damage, pilot) : shot.damage,
+          shot.sourceEnemy,
+          pilot
         );
       }
-      if (shot.effectType === "hack") {
+      if (shot.effectType === "hack" && localPilotEntity(pilot)) {
         infectPlayerWithHack(shot.effectDuration || 3.5);
       }
+      break;
     }
   }
 
@@ -10910,21 +11033,25 @@ function updateEnemies(dt) {
 }
 
 function updateGems(dt) {
-  const magnetRadius = 90 + state.player.passives.magnet * 42;
-  const pickupRadius = 22 + state.player.passives.magnet * 8;
+  const pilots = activeCombatPilots();
   for (const gem of state.gems) {
     gem.y += gem.vy * dt;
     gem.vy *= 0.96;
-    const d = distance(gem, state.player);
-    if (d < magnetRadius) {
-      const angle = Math.atan2(state.player.y - gem.y, state.player.x - gem.x);
-      const accel = 220 + state.player.passives.magnet * 70;
+    const magnetPilot = pilots
+      .filter(pilot => distance(gem, pilot) < 90 + (pilot.passives?.magnet || 0) * 42)
+      .sort((a, b) => distance(gem, a) - distance(gem, b))[0];
+    if (magnetPilot) {
+      const angle = Math.atan2(magnetPilot.y - gem.y, magnetPilot.x - gem.x);
+      const accel = 220 + (magnetPilot.passives?.magnet || 0) * 70;
       gem.x += Math.cos(angle) * accel * dt;
       gem.y += Math.sin(angle) * accel * dt;
     }
 
-    if (d <= pickupRadius) {
-      gainXp(gem.xp);
+    const pickupPilot = pilots
+      .filter(pilot => distance(gem, pilot) <= 22 + (pilot.passives?.magnet || 0) * 8)
+      .sort((a, b) => distance(gem, a) - distance(gem, b))[0];
+    if (pickupPilot) {
+      gainXp(gem.xp, pickupPilot);
       gem.collected = true;
       burst(gem.x, gem.y, gem.color, 6);
     }
@@ -10932,10 +11059,13 @@ function updateGems(dt) {
   state.gems = state.gems.filter(gem => !gem.collected);
 }
 
-function gainXp(amount) {
-  const player = state.player;
+function gainXp(amount, targetPlayer = state.player) {
+  const player = targetPlayer;
+  if (!player) return;
   const recovered = Math.ceil(amount * player.xpMultiplier);
-  state.runStats.scrapRecovered += recovered;
+  if (localPilotEntity(player)) {
+    state.runStats.scrapRecovered += recovered;
+  }
   player.scrap = (player.scrap || 0) + recovered;
   if (player.upgradesMaxed) return;
   player.xp += recovered;
@@ -10947,11 +11077,13 @@ function gainXp(amount) {
     gainedVersions += 1;
   }
   if (gainedVersions > 0) {
-    statusText.textContent = gainedVersions === 1
-      ? `${formatVersionLabel(player.level)} reached. Open Voyage Upgrades with Tab / Y to spend Scrap.`
-      : `${formatVersionLabel(player.level)} reached. ${gainedVersions} versions recovered. Open Voyage Upgrades with Tab / Y to spend Scrap.`;
+    if (localPilotEntity(player)) {
+      statusText.textContent = gainedVersions === 1
+        ? `${formatVersionLabel(player.level)} reached. Open Voyage Upgrades with Tab / Y to spend Scrap.`
+        : `${formatVersionLabel(player.level)} reached. ${gainedVersions} versions recovered. Open Voyage Upgrades with Tab / Y to spend Scrap.`;
+    }
     floatingText(player.x, player.y - 62, `${formatVersionLabel(player.level)}`, "#8af6ff", 0.68);
-    if (voyageUpgradeMenuActive()) {
+    if (localPilotEntity(player) && voyageUpgradeMenuActive()) {
       renderVoyageUpgradesMenu();
     }
   }
@@ -11319,11 +11451,37 @@ function update(dt) {
   state.hullDamageFlash = Math.max(0, state.hullDamageFlash - dt * 1.55);
   if (multiplayerRunClient()) {
     if (state.player) {
-      updatePlayer(dt);
+      const move = applyPlayerControlModifiers(getMoveVector(), state.player);
+      const localAiming =
+        (state.pointerActive && Math.hypot(state.pointerVector.x, state.pointerVector.y) > 0.08) ||
+        Math.hypot(state.gamepad.aimX, state.gamepad.aimY) > 0.1;
+      const localAction =
+        move.active ||
+        localAiming ||
+        state.keys.has("shiftleft") ||
+        (state.gamepad.boostAmount || 0) > 0.12 ||
+        multiplayerRuntime().pendingDash ||
+        Math.hypot(state.player.vx || 0, state.player.vy || 0) > 8 ||
+        (state.player.dashTimer || 0) > 0;
+      if (localAction) {
+        updatePlayer(dt);
+      } else {
+        state.player.prevX = state.player.x;
+        state.player.prevY = state.player.y;
+        state.player.vx = 0;
+        state.player.vy = 0;
+        state.player.thrusting = false;
+        state.player.boosting = false;
+        state.player.engineOutput += (0 - (state.player.engineOutput || 0)) * Math.min(1, dt * 4.5);
+      }
       if (Number.isFinite(state.player.netTargetX) && Number.isFinite(state.player.netTargetY)) {
         const correctionBlend = Math.min(1, dt * 7);
         state.player.x += (state.player.netTargetX - state.player.x) * correctionBlend;
         state.player.y += (state.player.netTargetY - state.player.y) * correctionBlend;
+        if (!localAction && Math.hypot(state.player.netTargetX - state.player.x, state.player.netTargetY - state.player.y) < 1.2) {
+          state.player.x = state.player.netTargetX;
+          state.player.y = state.player.netTargetY;
+        }
       }
     }
     for (const pilot of Object.values(multiplayerRuntime().remotePilots || {})) {

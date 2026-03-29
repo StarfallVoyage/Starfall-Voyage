@@ -175,8 +175,8 @@ const HANGAR_UPGRADE_LEVEL_CAP = 100;
 const INFINITE_RUN_UPGRADE_LEVEL = Number.POSITIVE_INFINITY;
 const WEAPON_SWITCH_COOLDOWN = 1;
 const WEAPON_SWITCH_FIRE_DELAY = 0.16;
-const MULTIPLAYER_INPUT_INTERVAL = 0.06;
-const MULTIPLAYER_SNAPSHOT_INTERVAL = 0.16;
+const MULTIPLAYER_INPUT_INTERVAL = 1 / 60;
+const MULTIPLAYER_SNAPSHOT_INTERVAL = 1 / 60;
 const MULTIPLAYER_SYNC_RANGE = 960;
 const MULTIPLAYER_SYNC_PROJECTILE_CAP = 90;
 const MULTIPLAYER_SYNC_ENEMY_CAP = 120;
@@ -6443,12 +6443,27 @@ function snapshotWorldState() {
   };
 }
 
-function applyPilotSnapshot(target, snapshot) {
+function applyPilotSnapshot(target, snapshot, options = {}) {
   if (!target || !snapshot) return;
-  target.x = snapshot.x;
-  target.y = snapshot.y;
-  target.prevX = snapshot.x;
-  target.prevY = snapshot.y;
+  const smoothPosition = Boolean(options.smoothPosition);
+  if (smoothPosition) {
+    const initialized = Number.isFinite(target.netTargetX) && Number.isFinite(target.netTargetY);
+    target.netTargetX = snapshot.x;
+    target.netTargetY = snapshot.y;
+    if (!initialized) {
+      target.x = snapshot.x;
+      target.y = snapshot.y;
+      target.prevX = snapshot.x;
+      target.prevY = snapshot.y;
+    }
+  } else {
+    target.x = snapshot.x;
+    target.y = snapshot.y;
+    target.prevX = snapshot.x;
+    target.prevY = snapshot.y;
+    target.netTargetX = snapshot.x;
+    target.netTargetY = snapshot.y;
+  }
   target.vx = snapshot.vx || 0;
   target.vy = snapshot.vy || 0;
   target.facing = snapshot.facing || 0;
@@ -6498,6 +6513,15 @@ function applyPilotSnapshot(target, snapshot) {
   };
 }
 
+function smoothSnapshotPilot(target, dt, snapFactor = 10) {
+  if (!target || !Number.isFinite(target.netTargetX) || !Number.isFinite(target.netTargetY)) return;
+  target.prevX = target.x;
+  target.prevY = target.y;
+  const blend = Math.min(1, dt * snapFactor);
+  target.x += (target.netTargetX - target.x) * blend;
+  target.y += (target.netTargetY - target.y) * blend;
+}
+
 function applyWorldSnapshot(snapshot) {
   if (!multiplayerRunClient() || !snapshot) return;
   state.time = snapshot.time || 0;
@@ -6519,12 +6543,14 @@ function applyWorldSnapshot(snapshot) {
     if (!state.player) {
       state.player = makePlayer();
     }
-    applyPilotSnapshot(state.player, localPilot);
+    applyPilotSnapshot(state.player, localPilot, { smoothPosition: true });
   }
+  const existingRemotes = multiplayerRuntime().remotePilots || {};
   const remotes = {};
   pilots.filter(pilot => pilot.id !== state.multiplayer.playerId).forEach(pilot => {
-    const entity = makeNetworkPilot(pilot.id, pilot.name);
-    applyPilotSnapshot(entity, pilot);
+    const entity = existingRemotes[pilot.id] || makeNetworkPilot(pilot.id, pilot.name);
+    entity.name = pilot.name || entity.name;
+    applyPilotSnapshot(entity, pilot, { smoothPosition: true });
     remotes[pilot.id] = entity;
   });
   multiplayerRuntime().remotePilots = remotes;
@@ -11292,6 +11318,17 @@ function update(dt) {
   state.shieldDamageFlash = Math.max(0, state.shieldDamageFlash - dt * 1.85);
   state.hullDamageFlash = Math.max(0, state.hullDamageFlash - dt * 1.55);
   if (multiplayerRunClient()) {
+    if (state.player) {
+      updatePlayer(dt);
+      if (Number.isFinite(state.player.netTargetX) && Number.isFinite(state.player.netTargetY)) {
+        const correctionBlend = Math.min(1, dt * 7);
+        state.player.x += (state.player.netTargetX - state.player.x) * correctionBlend;
+        state.player.y += (state.player.netTargetY - state.player.y) * correctionBlend;
+      }
+    }
+    for (const pilot of Object.values(multiplayerRuntime().remotePilots || {})) {
+      smoothSnapshotPilot(pilot, dt, 12);
+    }
     updateEffects(dt);
     updateCamera(dt);
     syncHud();

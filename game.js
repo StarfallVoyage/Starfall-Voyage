@@ -218,6 +218,7 @@ const weaponPreviewCache = new Map();
 const basicUpgradeIconCache = new Map();
 const basicUpgradePreviewCache = new Map();
 const augmentIconCache = new Map();
+let multiplayerSnapshotEntitySeed = 1;
 const choiceCardAssetSources = {
   emberBolt: `${SPRITE_ASSET_ROOT}/Photonlance.png`,
   plasmaCannon: `${SPRITE_ASSET_ROOT}/Plasmacannon.png`,
@@ -5740,21 +5741,6 @@ function gamepadMenuTargets() {
   if (!runSummary.classList.contains("hidden")) {
     return [runSummaryClose];
   }
-  if (teamVoyageMenu && !teamVoyageMenu.classList.contains("hidden")) {
-    return Array.from(teamVoyageMenu.querySelectorAll("button")).filter(node => {
-      if (!(node instanceof HTMLButtonElement)) return false;
-      if (node.disabled) return false;
-      if (node.getClientRects().length === 0) return false;
-      const style = getComputedStyle(node);
-      return style.display !== "none" && style.visibility !== "hidden";
-    });
-  }
-  if (mainMenuSettingsMenu && !mainMenuSettingsMenu.classList.contains("hidden")) {
-    return [mainMenuSettingsBack, mainMenuFullscreen, mainMenuMusicVolume, mainMenuSfxVolume, mainMenuOtherSfxVolume].filter(Boolean);
-  }
-  if (mainMenuScreen && !mainMenuScreen.classList.contains("hidden")) {
-    return [mainMenuSoloButton, mainMenuTeamButton, mainMenuSettingsButton, mainMenuLeaderboardsButton].filter(Boolean);
-  }
   if (!hangarHostilesMenu.classList.contains("hidden")) {
     return [hangarHostilesBack];
   }
@@ -5773,6 +5759,21 @@ function gamepadMenuTargets() {
       ...(!hangarUpgradesRespec?.disabled ? [hangarUpgradesRespec] : []),
       ...Array.from(hangarMetaUpgrades.querySelectorAll(".meta-upgrade button")),
     ];
+  }
+  if (teamVoyageMenu && !teamVoyageMenu.classList.contains("hidden")) {
+    return Array.from(teamVoyageMenu.querySelectorAll("button")).filter(node => {
+      if (!(node instanceof HTMLButtonElement)) return false;
+      if (node.disabled) return false;
+      if (node.getClientRects().length === 0) return false;
+      const style = getComputedStyle(node);
+      return style.display !== "none" && style.visibility !== "hidden";
+    });
+  }
+  if (mainMenuSettingsMenu && !mainMenuSettingsMenu.classList.contains("hidden")) {
+    return [mainMenuSettingsBack, mainMenuFullscreen, mainMenuMusicVolume, mainMenuSfxVolume, mainMenuOtherSfxVolume].filter(Boolean);
+  }
+  if (mainMenuScreen && !mainMenuScreen.classList.contains("hidden")) {
+    return [mainMenuSoloButton, mainMenuTeamButton, mainMenuSettingsButton, mainMenuLeaderboardsButton].filter(Boolean);
   }
   if (!hangarScreen.classList.contains("hidden")) {
     return [
@@ -6486,6 +6487,78 @@ function visibleToAnyMultiplayerPilot(entity, padding = MULTIPLAYER_SYNC_RANGE) 
   return pilots.some(pilot => pilot && Math.abs(entity.x - pilot.x) <= padding && Math.abs(entity.y - pilot.y) <= padding);
 }
 
+function nearestMultiplayerPilotDistance(entity) {
+  if (!entity) return Infinity;
+  const pilots = [state.player, ...Object.values(multiplayerRuntime().remotePilots)].filter(Boolean);
+  let nearestDistance = Infinity;
+  for (const pilot of pilots) {
+    nearestDistance = Math.min(nearestDistance, distance(entity, pilot));
+  }
+  return nearestDistance;
+}
+
+function ensureMultiplayerSnapshotEntityId(entity, prefix = "entity") {
+  if (!entity) return "";
+  if (!entity.multiplayerSyncId) {
+    entity.multiplayerSyncId = `${prefix}-${multiplayerSnapshotEntitySeed++}`;
+  }
+  return entity.multiplayerSyncId;
+}
+
+function reconcileSnapshotEntities(existingList, snapshotList, options = {}) {
+  const smoothPosition = Boolean(options.smoothPosition);
+  const existingById = new Map();
+  for (const entity of existingList || []) {
+    const id = entity?.syncId || entity?.multiplayerSyncId;
+    if (id) {
+      existingById.set(id, entity);
+    }
+  }
+  const next = [];
+  for (const snapshot of snapshotList || []) {
+    const id = snapshot?.syncId || snapshot?.multiplayerSyncId || "";
+    const { x = 0, y = 0, ...rest } = snapshot || {};
+    const existing = id ? existingById.get(id) : null;
+    if (existing) {
+      Object.assign(existing, rest);
+      existing.syncId = id;
+      existing.multiplayerSyncId = id;
+      if (smoothPosition) {
+        const initialized = Number.isFinite(existing.netTargetX) && Number.isFinite(existing.netTargetY);
+        existing.netTargetX = x;
+        existing.netTargetY = y;
+        if (!initialized) {
+          existing.x = x;
+          existing.y = y;
+          existing.prevX = x;
+          existing.prevY = y;
+        }
+      } else {
+        existing.x = x;
+        existing.y = y;
+        existing.prevX = x;
+        existing.prevY = y;
+        existing.netTargetX = x;
+        existing.netTargetY = y;
+      }
+      next.push(existing);
+      continue;
+    }
+    next.push({
+      ...rest,
+      x,
+      y,
+      prevX: x,
+      prevY: y,
+      netTargetX: x,
+      netTargetY: y,
+      syncId: id,
+      multiplayerSyncId: id,
+    });
+  }
+  return next;
+}
+
 function serializeMultiplayerPilot(id, pilot, extra = {}) {
   const phazer = pilot?.weapons?.photonPhazer;
   const weaponLevels = Object.fromEntries(
@@ -6548,9 +6621,12 @@ function snapshotWorldState() {
   }
 
   const enemies = [];
-  for (const enemy of state.enemies) {
-    if (enemy.alive === false || !visibleToAnyMultiplayerPilot(enemy)) continue;
+  const visibleEnemies = state.enemies
+    .filter(enemy => enemy.alive !== false && visibleToAnyMultiplayerPilot(enemy))
+    .sort((a, b) => nearestMultiplayerPilotDistance(a) - nearestMultiplayerPilotDistance(b));
+  for (const enemy of visibleEnemies) {
     enemies.push({
+      syncId: ensureMultiplayerSnapshotEntityId(enemy, "enemy"),
       type: enemy.type,
       x: enemy.x,
       y: enemy.y,
@@ -6576,9 +6652,15 @@ function snapshotWorldState() {
   }
 
   const projectiles = [];
-  for (const shot of state.projectiles) {
-    if (!visibleToAnyMultiplayerPilot(shot, MULTIPLAYER_SYNC_RANGE + 180)) continue;
+  const visibleProjectiles = state.projectiles
+    .filter(shot => visibleToAnyMultiplayerPilot(shot, MULTIPLAYER_SYNC_RANGE + 180))
+    .sort((a, b) => {
+      if (Boolean(a.hostile) !== Boolean(b.hostile)) return Boolean(a.hostile) ? -1 : 1;
+      return nearestMultiplayerPilotDistance(a) - nearestMultiplayerPilotDistance(b);
+    });
+  for (const shot of visibleProjectiles) {
     projectiles.push({
+      syncId: ensureMultiplayerSnapshotEntityId(shot, "shot"),
       kind: shot.kind || "shot",
       x: shot.x,
       y: shot.y,
@@ -6612,6 +6694,7 @@ function snapshotWorldState() {
     enemies,
     projectiles,
     asteroids: state.asteroids.filter(asteroid => visibleToAnyMultiplayerPilot(asteroid, MULTIPLAYER_SYNC_RANGE + 260)).map(asteroid => ({
+      syncId: ensureMultiplayerSnapshotEntityId(asteroid, "asteroid"),
       x: asteroid.x,
       y: asteroid.y,
       radius: asteroid.radius,
@@ -6757,6 +6840,19 @@ function smoothSnapshotPilot(target, dt, snapFactor = 10) {
   target.y += (target.netTargetY - target.y) * blend;
 }
 
+function smoothSnapshotEntity(target, dt, snapFactor = 10, predictive = false) {
+  if (!target || !Number.isFinite(target.netTargetX) || !Number.isFinite(target.netTargetY)) return;
+  target.prevX = target.x;
+  target.prevY = target.y;
+  if (predictive) {
+    target.x += (target.vx || 0) * dt;
+    target.y += (target.vy || 0) * dt;
+  }
+  const blend = Math.min(1, dt * snapFactor);
+  target.x += (target.netTargetX - target.x) * blend;
+  target.y += (target.netTargetY - target.y) * blend;
+}
+
 function voyageUpgradeRenderSignature(player = state.player) {
   if (!player) return "";
   const weaponLevels = Object.fromEntries(
@@ -6822,9 +6918,9 @@ function applyWorldSnapshot(snapshot) {
     remotes[pilot.id] = entity;
   });
   multiplayerRuntime().remotePilots = remotes;
-  state.enemies = (snapshot.enemies || []).map(enemy => ({ ...enemy }));
-  state.projectiles = (snapshot.projectiles || []).map(shot => ({ ...shot }));
-  state.asteroids = (snapshot.asteroids || []).map(entry => ({ ...entry }));
+  state.enemies = reconcileSnapshotEntities(state.enemies, snapshot.enemies || [], { smoothPosition: true });
+  state.projectiles = reconcileSnapshotEntities(state.projectiles, snapshot.projectiles || [], { smoothPosition: true });
+  state.asteroids = reconcileSnapshotEntities(state.asteroids, snapshot.asteroids || [], { smoothPosition: true });
   state.gems = (snapshot.gems || []).map(entry => ({ ...entry }));
   state.crates = (snapshot.crates || []).map(entry => ({ ...entry }));
   state.hazards = (snapshot.hazards || []).map(entry => ({ ...entry }));
@@ -7355,7 +7451,7 @@ function renderTeamVoyageLobby() {
     teamVoyageJoin.dataset.instantConfirm = "true";
   }
   if (teamVoyageBay) {
-    teamVoyageBay.disabled = connected;
+    teamVoyageBay.disabled = state.multiplayer.connecting;
     teamVoyageBay.dataset.instantConfirm = "true";
   }
   renderTeamVoyagePlayers();
@@ -7724,6 +7820,26 @@ function openTeamVoyageMenu() {
   syncGamepadFocus();
 }
 
+function setHangarUpgradesContext(context = "hangar") {
+  if (hangarUpgradesMenu) {
+    hangarUpgradesMenu.dataset.returnContext = context;
+  }
+  if (hangarUpgradesBack) {
+    hangarUpgradesBack.textContent = context === "teamvoyage" ? "Back To Team Voyage" : "Back To Hangar";
+  }
+}
+
+function openTeamVoyageEngineeringBay() {
+  if (state.mode !== "mainmenu") return;
+  switchMetaProfile("coop");
+  keepHubAmbienceAlive();
+  setHangarUpgradesContext("teamvoyage");
+  renderMetaUpgrades();
+  hangarUpgradesMenu.classList.remove("hidden");
+  state.gamepad.menuIndex = 0;
+  syncGamepadFocus();
+}
+
 function closeTeamVoyageMenu() {
   switchMusicMode("hub");
   keepHubAmbienceAlive();
@@ -7785,6 +7901,7 @@ function beginLaunchSequence() {
 function openHangarUpgradesMenu() {
   if (state.mode !== "menu") return;
   keepHubAmbienceAlive();
+  setHangarUpgradesContext("hangar");
   hangarSettingsMenu.classList.add("hidden");
   hangarRecordsMenu.classList.add("hidden");
   hangarAugmentsMenu.classList.add("hidden");
@@ -7899,7 +8016,14 @@ function resetProgress() {
 
 function closeHangarUpgradesMenu() {
   keepHubAmbienceAlive();
+  const returnContext = hangarUpgradesMenu?.dataset?.returnContext || "hangar";
   hangarUpgradesMenu.classList.add("hidden");
+  setHangarUpgradesContext("hangar");
+  if (returnContext === "teamvoyage") {
+    state.gamepad.menuIndex = 0;
+    syncGamepadFocus();
+    return;
+  }
   state.gamepad.menuIndex = 0;
   syncGamepadFocus();
 }
@@ -8047,6 +8171,10 @@ function purchaseVoyageUpgrade(choice) {
 
 function handleMenuBack() {
   clearMenuConfirmHold();
+  if (!hangarUpgradesMenu.classList.contains("hidden")) {
+    closeHangarUpgradesMenu();
+    return true;
+  }
   if (teamVoyageMenu && !teamVoyageMenu.classList.contains("hidden")) {
     handleTeamVoyageBack();
     return true;
@@ -8081,10 +8209,6 @@ function handleMenuBack() {
   }
   if (!hangarSettingsMenu.classList.contains("hidden")) {
     closeHangarSettingsMenu();
-    return true;
-  }
-  if (!hangarUpgradesMenu.classList.contains("hidden")) {
-    closeHangarUpgradesMenu();
     return true;
   }
   if (state.mode === "planet") {
@@ -11947,6 +12071,15 @@ function update(dt) {
     for (const pilot of Object.values(multiplayerRuntime().remotePilots || {})) {
       smoothSnapshotPilot(pilot, dt, 12);
     }
+    for (const enemy of state.enemies || []) {
+      smoothSnapshotEntity(enemy, dt, 12, false);
+    }
+    for (const shot of state.projectiles || []) {
+      smoothSnapshotEntity(shot, dt, 18, true);
+    }
+    for (const asteroid of state.asteroids || []) {
+      smoothSnapshotEntity(asteroid, dt, 12, false);
+    }
     updateEffects(dt);
     updateCamera(dt);
     syncHud();
@@ -14069,7 +14202,7 @@ teamVoyageJoin?.addEventListener("click", () => {
 });
 
 teamVoyageBay?.addEventListener("click", () => {
-  showHangar("Co-op engineering profile active. Upgrade your multiplayer ship, then return to the main menu and reopen Team Voyage when ready.");
+  openTeamVoyageEngineeringBay();
 });
 
 teamVoyageServerUrl?.addEventListener("input", event => {

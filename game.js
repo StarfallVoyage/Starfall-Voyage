@@ -181,6 +181,10 @@ const MULTIPLAYER_SNAPSHOT_INTERVAL = 1 / 60;
 const MULTIPLAYER_SYNC_RANGE = 960;
 const MULTIPLAYER_SYNC_PROJECTILE_CAP = 90;
 const MULTIPLAYER_SYNC_ENEMY_CAP = 120;
+const MULTIPLAYER_REVIVE_BASE_COST = 100;
+const MULTIPLAYER_REVIVE_HOLD_TIME = 1;
+const MULTIPLAYER_REVIVE_RANGE = 52;
+const MULTIPLAYER_TARGET_HEALTH_PRIORITY_RANGE = 120;
 const MAX_SLOW_FIELD_RADIUS = 210;
 const PLANET_SPAWN_INTERVAL = 90;
 const PLANET_SPAWN_CHANCE = 0.25;
@@ -397,6 +401,7 @@ const state = {
     startingWeapon: "emberBolt",
     normalWeaponUnlocksPurchased: 0,
     advancedWeaponUnlocksPurchased: 0,
+    reviveCount: 0,
   },
   settings: {
     musicVolume: 0.8,
@@ -432,6 +437,7 @@ const state = {
       pendingDash: false,
       pendingSessionMode: null,
       pendingSessionModeUntil: 0,
+      lastVoyageUpgradeSignature: "",
     },
   },
   sceneTransitionActive: false,
@@ -3672,6 +3678,9 @@ function makePlayer() {
     boostUiAlpha: 0,
     enginePulse: 0,
     engineOutput: 0,
+    downed: false,
+    reviveProgress: 0,
+    reviveCost: 0,
     weaponSwitchCooldown: 0,
     dashCooldown: 0,
     dashTimer: 0,
@@ -3760,6 +3769,7 @@ function resetGame() {
   state.currentRun.startingWeapon = state.runConfig.startingWeapon;
   state.currentRun.normalWeaponUnlocksPurchased = 0;
   state.currentRun.advancedWeaponUnlocksPurchased = 0;
+  state.currentRun.reviveCount = 0;
   state.voyageZoneClock = ventariVoyageActive(state.currentRun.voyageId) ? ventariZoneSpawnDelay() : 8;
   state.player = makePlayer();
   if (multiplayerRunHost()) {
@@ -3879,7 +3889,7 @@ function setPendingSessionMode(mode) {
   if (!multiplayerRunClient()) return;
   const runtime = multiplayerRuntime();
   runtime.pendingSessionMode = mode;
-  runtime.pendingSessionModeUntil = performance.now() + 450;
+  runtime.pendingSessionModeUntil = performance.now() + 1200;
 }
 
 function clearPendingSessionMode(mode = null) {
@@ -6182,7 +6192,7 @@ function adjustFocusedRange(delta) {
 
 function performDash() {
   const player = state.player;
-  if (!player || player.dashCooldown > 0 || state.mode !== "playing" || player.disabledTimer > 0) return;
+  if (!player || player.downed || player.dashCooldown > 0 || state.mode !== "playing" || player.disabledTimer > 0) return;
   if (multiplayerRunClient()) {
     multiplayerRuntime().pendingDash = true;
     return;
@@ -6335,6 +6345,7 @@ function clearMultiplayerRuntime() {
     pendingDash: false,
     pendingSessionMode: null,
     pendingSessionModeUntil: 0,
+    lastVoyageUpgradeSignature: "",
   };
 }
 
@@ -6349,6 +6360,10 @@ function teamVoyageRoomSettings() {
     timerMinutes: clamp(Math.round(state.multiplayer.lobbySettings?.timerMinutes || 5), 5, BASE_RUN_TIME / 60 + MAX_EXTRA_RUN_STEPS * 5),
     startingWeapon: state.multiplayer.lobbySettings?.startingWeapon || state.runConfig.startingWeapon || "emberBolt",
   };
+}
+
+function multiplayerReviveCost(run = state.currentRun) {
+  return MULTIPLAYER_REVIVE_BASE_COST * Math.pow(2, Math.max(0, Math.floor(run?.reviveCount || 0)));
 }
 
 function applyTeamVoyageRoomSettingsToRun(room) {
@@ -6399,6 +6414,9 @@ function makeNetworkPilot(id, name, index = 0, profileMeta = null) {
   pilot.vy = 0;
   pilot.facing = 0;
   pilot.rotation = 0;
+  pilot.downed = false;
+  pilot.reviveProgress = 0;
+  pilot.reviveCost = 0;
   pilot.level = 1;
   pilot.scrap = 0;
   pilot.xp = 0;
@@ -6467,6 +6485,9 @@ function visibleToAnyMultiplayerPilot(entity, padding = MULTIPLAYER_SYNC_RANGE) 
 
 function serializeMultiplayerPilot(id, pilot, extra = {}) {
   const phazer = pilot?.weapons?.photonPhazer;
+  const weaponLevels = Object.fromEntries(
+    Object.entries(pilot?.weapons || {}).map(([weaponId, state]) => [weaponId, Math.max(0, Math.floor(state?.level || 0))])
+  );
   return {
     id,
     name: extra.name || "Pilot",
@@ -6491,8 +6512,13 @@ function serializeMultiplayerPilot(id, pilot, extra = {}) {
     dashTimer: pilot.dashTimer || 0,
     enginePulse: pilot.enginePulse || 0,
     engineOutput: pilot.engineOutput || 0,
+    downed: Boolean(pilot.downed),
+    reviveProgress: pilot.reviveProgress || 0,
+    reviveCost: pilot.downed ? multiplayerReviveCost() : 0,
     primaryWeapon: pilot.primaryWeapon || "emberBolt",
     primaryWeaponLevel: primaryWeaponState(pilot)?.level || 0,
+    weaponLevels,
+    passives: { ...(pilot.passives || {}) },
     orbitBladeLevel: pilot?.weapons?.orbitBlades?.level || 0,
     orbitBladeAngle: pilot?.weapons?.orbitBlades?.angle || 0,
     photonPhazerLevel: pilot?.weapons?.photonPhazer?.level || 0,
@@ -6527,6 +6553,7 @@ function snapshotWorldState() {
       maxHp: enemy.maxHp,
       shield: enemy.shield || 0,
       maxShield: enemy.maxShield || 0,
+      facing: enemy.facing || 0,
       hitFlash: enemy.hitFlash || 0,
       slowed: Boolean(enemy.slowed),
       elite: Boolean(enemy.elite),
@@ -6571,6 +6598,9 @@ function snapshotWorldState() {
       difficulty: state.currentRun.difficulty,
       voyageId: state.currentRun.voyageId,
       startingWeapon: state.currentRun.startingWeapon,
+      normalWeaponUnlocksPurchased: state.currentRun.normalWeaponUnlocksPurchased || 0,
+      advancedWeaponUnlocksPurchased: state.currentRun.advancedWeaponUnlocksPurchased || 0,
+      reviveCount: state.currentRun.reviveCount || 0,
     },
     pilots,
     enemies,
@@ -6666,6 +6696,9 @@ function applyPilotSnapshot(target, snapshot, options = {}) {
   target.dashTimer = snapshot.dashTimer || 0;
   target.enginePulse = snapshot.enginePulse || 0;
   target.engineOutput = snapshot.engineOutput || 0;
+  target.downed = Boolean(snapshot.downed);
+  target.reviveProgress = snapshot.reviveProgress || 0;
+  target.reviveCost = snapshot.reviveCost || 0;
   target.primaryWeapon = snapshot.primaryWeapon || target.primaryWeapon || "emberBolt";
   if (!target.weapons) {
     target.weapons = {
@@ -6682,6 +6715,18 @@ function applyPilotSnapshot(target, snapshot, options = {}) {
       snapshot.primaryWeaponLevel || 1
     );
   }
+  if (snapshot.weaponLevels) {
+    for (const [weaponId, level] of Object.entries(snapshot.weaponLevels)) {
+      if (!target.weapons[weaponId]) {
+        target.weapons[weaponId] = { level: 0, cooldown: 0 };
+      }
+      target.weapons[weaponId].level = Math.max(0, Math.floor(level || 0));
+    }
+  }
+  target.passives = {
+    ...(target.passives || {}),
+    ...(snapshot.passives || {}),
+  };
   target.weapons.orbitBlades = {
     ...(target.weapons.orbitBlades || {}),
     level: snapshot.orbitBladeLevel || 0,
@@ -6704,6 +6749,23 @@ function smoothSnapshotPilot(target, dt, snapFactor = 10) {
   const blend = Math.min(1, dt * snapFactor);
   target.x += (target.netTargetX - target.x) * blend;
   target.y += (target.netTargetY - target.y) * blend;
+}
+
+function voyageUpgradeRenderSignature(player = state.player) {
+  if (!player) return "";
+  const weaponLevels = Object.fromEntries(
+    Object.entries(player.weapons || {}).map(([id, weaponState]) => [id, Math.max(0, Math.floor(weaponState?.level || 0))])
+  );
+  return JSON.stringify({
+    scrap: Math.floor(player.scrap || 0),
+    level: player.level || 1,
+    primaryWeapon: player.primaryWeapon || "emberBolt",
+    downed: Boolean(player.downed),
+    weaponLevels,
+    passives: player.passives || {},
+    normalWeaponUnlocksPurchased: state.currentRun.normalWeaponUnlocksPurchased || 0,
+    advancedWeaponUnlocksPurchased: state.currentRun.advancedWeaponUnlocksPurchased || 0,
+  });
 }
 
 function applyWorldSnapshot(snapshot) {
@@ -6733,6 +6795,9 @@ function applyWorldSnapshot(snapshot) {
     state.currentRun.difficulty = snapshot.currentRun.difficulty || state.currentRun.difficulty;
     state.currentRun.voyageId = snapshot.currentRun.voyageId || state.currentRun.voyageId;
     state.currentRun.startingWeapon = snapshot.currentRun.startingWeapon || state.currentRun.startingWeapon;
+    state.currentRun.normalWeaponUnlocksPurchased = Math.max(0, Math.floor(snapshot.currentRun.normalWeaponUnlocksPurchased || 0));
+    state.currentRun.advancedWeaponUnlocksPurchased = Math.max(0, Math.floor(snapshot.currentRun.advancedWeaponUnlocksPurchased || 0));
+    state.currentRun.reviveCount = Math.max(0, Math.floor(snapshot.currentRun.reviveCount || 0));
   }
   const pilots = Array.isArray(snapshot.pilots) ? snapshot.pilots : [];
   const localPilot = pilots.find(pilot => pilot.id === state.multiplayer.playerId) || pilots[0];
@@ -6761,12 +6826,40 @@ function applyWorldSnapshot(snapshot) {
   state.orbitalStrikes = (snapshot.orbitalStrikes || []).map(entry => ({ ...entry }));
   state.voyageZones = (snapshot.voyageZones || []).map(entry => ({ ...entry }));
   if (voyageUpgradeMenuActive()) {
-    renderVoyageUpgradesMenu();
+    const nextSignature = voyageUpgradeRenderSignature(state.player);
+    if (runtime.lastVoyageUpgradeSignature !== nextSignature) {
+      const focusedUpgradeId = document.activeElement?.dataset?.voyageUpgradeId
+        || gamepadMenuTargets()[state.gamepad.menuIndex]?.dataset?.voyageUpgradeId
+        || "";
+      const anchorSelector = focusedUpgradeId ? `[data-voyage-upgrade-id="${focusedUpgradeId}"]` : ".voyage-upgrade-purchase";
+      const scrollAnchor = captureScrollAnchor(voyageUpgradeGrid, anchorSelector);
+      renderVoyageUpgradesMenu();
+      restoreScrollAnchor(voyageUpgradeGrid, anchorSelector, scrollAnchor);
+      const targets = gamepadMenuTargets();
+      const targetIndex = focusedUpgradeId
+        ? targets.findIndex(node => node?.dataset?.voyageUpgradeId === focusedUpgradeId)
+        : Math.min(state.gamepad.menuIndex, Math.max(0, targets.length - 1));
+      state.gamepad.menuIndex = targetIndex >= 0 ? targetIndex : Math.min(state.gamepad.menuIndex, Math.max(0, targets.length - 1));
+      applyGamepadFocus(targets, false);
+      runtime.lastVoyageUpgradeSignature = nextSignature;
+    }
   }
   syncHud();
 }
 
 function currentMultiplayerInput() {
+  if (state.player?.downed) {
+    return {
+      moveX: 0,
+      moveY: 0,
+      strength: 0,
+      active: false,
+      aimX: Math.cos(state.player?.facing || 0),
+      aimY: Math.sin(state.player?.facing || 0),
+      boost: 0,
+      dash: false,
+    };
+  }
   const move = getMoveVector();
   let aimX = Math.cos(state.player?.facing || 0);
   let aimY = Math.sin(state.player?.facing || 0);
@@ -6844,8 +6937,23 @@ function updateRemotePilot(pilot, dt) {
   pilot.shieldRegenDelay = Math.max(0, (pilot.shieldRegenDelay || 0) - dt);
   pilot.disabledTimer = Math.max(0, (pilot.disabledTimer || 0) - dt);
   pilot.hackInfectionTimer = Math.max(0, (pilot.hackInfectionTimer || 0) - dt);
+  pilot.reviveProgress = Math.max(0, pilot.reviveProgress || 0);
+  pilot.reviveCost = pilot.downed ? multiplayerReviveCost() : 0;
   if (pilot.dashTimer > 0) {
     pilot.invuln = Math.max(pilot.invuln || 0, pilot.dashTimer);
+  }
+  if (pilot.downed) {
+    pilot.vx *= Math.exp(-dt * 10);
+    pilot.vy *= Math.exp(-dt * 10);
+    if (Math.hypot(pilot.vx, pilot.vy) < 4) {
+      pilot.vx = 0;
+      pilot.vy = 0;
+    }
+    pilot.thrusting = false;
+    pilot.boosting = false;
+    pilot.engineOutput += (0 - (pilot.engineOutput || 0)) * Math.min(1, dt * 7);
+    pilot.enginePulse += dt * 2.4;
+    return;
   }
   if (input.active) {
     pilot.vx += (input.moveX || 0) * thrust * (input.strength || 1) * dt;
@@ -6987,7 +7095,7 @@ function fireRemotePlasmaCannon(pilot) {
 function updateRemotePilotWeapons(dt) {
   if (!multiplayerRunHost()) return;
   for (const pilot of Object.values(multiplayerRuntime().remotePilots)) {
-    if (!pilot || (pilot.disabledTimer || 0) > 0) continue;
+    if (!pilot || pilot.downed || (pilot.disabledTimer || 0) > 0) continue;
     const primaryId = pilot.primaryWeapon || "emberBolt";
     const primary = pilot.weapons?.[primaryId];
     if (!primary || primary.level <= 0) continue;
@@ -7146,6 +7254,7 @@ function launchTeamVoyageRun(room) {
   runtime.inputClock = 0;
   runtime.snapshotClock = 0;
   runtime.pendingDash = false;
+  runtime.lastVoyageUpgradeSignature = "";
   runtime.remotePilots = {};
   showHangar("Team Voyage link locked. Preparing synchronized launch.");
   beginLaunchSequence();
@@ -7822,6 +7931,9 @@ function renderVoyageUpgradesMenu() {
     button.addEventListener("click", () => purchaseVoyageUpgrade(choice));
     voyageUpgradeGrid.appendChild(card);
   }
+  if (multiplayerRunActive()) {
+    multiplayerRuntime().lastVoyageUpgradeSignature = voyageUpgradeRenderSignature(player);
+  }
 }
 
 function applyVoyageUpgradeChoice(choice, player) {
@@ -7863,11 +7975,33 @@ function purchaseVoyageUpgrade(choice) {
     if (voyageWeaponChoiceUnlocked(choice, state.player)) return;
     const cost = voyageUpgradeCost(choice, state.player);
     if ((state.player.scrap || 0) < cost) return;
+    const previousUpgradeId = choice.id;
+    const anchorSelector = `[data-voyage-upgrade-id="${choice.id}"]`;
+    const scrollAnchor = captureScrollAnchor(voyageUpgradeGrid, anchorSelector);
+    const purchase = applyVoyageUpgradeChoice(choice, state.player);
+    if (!purchase) return;
+    const { previousLevel, newLevel, purchaseText, purchaseToast } = purchase;
+    if (choice.type === "weapon" && previousLevel <= 0) {
+      if (choice.id === "orbitBlades") {
+        playDroneHaloOnlineSfx();
+      } else if (choice.id === "photonPhazer") {
+        playPhotonPhazerOnlineSfx();
+      }
+    }
+    state.runStats.augments.push(choice.type === "weapon" ? `${choice.title} unlocked` : `${choice.title} ${formatVersionLabel(newLevel)}`);
+    statusText.textContent = `${purchaseText} Syncing with host...`;
+    renderVoyageUpgradesMenu();
+    restoreScrollAnchor(voyageUpgradeGrid, anchorSelector, scrollAnchor);
+    syncHud();
+    const targets = gamepadMenuTargets();
+    const targetIndex = targets.findIndex(node => node?.dataset?.voyageUpgradeId === previousUpgradeId);
+    state.gamepad.menuIndex = targetIndex >= 0 ? targetIndex : Math.min(state.gamepad.menuIndex, Math.max(0, targets.length - 1));
+    applyGamepadFocus(targets, false);
+    showUpgradePurchaseToast(voyageUpgradeCard(choice.id), purchaseToast, upgradeVisualFor(choice.id).accent);
     sendMultiplayerClientEvent({
       kind: "purchase_upgrade",
       upgradeId: choice.id,
     });
-    statusText.textContent = `Purchase request sent for ${choice.title}.`;
     return;
   }
   const previousUpgradeId = choice.id;
@@ -8153,6 +8287,9 @@ function beginPlayerDeathSequence(summaryPayload) {
   state.mode = "death";
   player.hp = 0;
   player.shield = 0;
+  player.downed = false;
+  player.reviveProgress = 0;
+  player.reviveCost = 0;
   player.boosting = false;
   player.thrusting = false;
   player.disabledTimer = Math.max(player.disabledTimer || 0, PLAYER_DEATH_SEQUENCE_TIME);
@@ -8911,6 +9048,7 @@ function makeEnemy(type) {
     deathSpawnHounds: stats.deathSpawnHounds || 0,
     elite: Boolean(stats.elite),
     displayName: stats.name || enemyDisplayName(type),
+    facing: 0,
     hitFlash: 0,
     shieldFlash: 0,
     freezeTimer: 0,
@@ -9073,6 +9211,32 @@ function playerEnemySlowMultiplier() {
 
 function updatePlayer(dt) {
   const player = state.player;
+  if (!player) return;
+  if (player.downed) {
+    player.prevX = player.x;
+    player.prevY = player.y;
+    player.vx *= Math.exp(-dt * 10);
+    player.vy *= Math.exp(-dt * 10);
+    if (Math.hypot(player.vx, player.vy) < 4) {
+      player.vx = 0;
+      player.vy = 0;
+    }
+    player.thrusting = false;
+    player.boosting = false;
+    player.boostCooldown = Math.max(0, player.boostCooldown - dt);
+    player.dashCooldown = Math.max(0, player.dashCooldown - dt);
+    player.dashTimer = 0;
+    player.invuln = Math.max(0, player.invuln - dt);
+    player.shieldRegenDelay = Math.max(0, player.shieldRegenDelay - dt);
+    player.disabledTimer = Math.max(0, player.disabledTimer - dt);
+    player.hackInfectionTimer = Math.max(0, (player.hackInfectionTimer || 0) - dt);
+    player.engineOutput += (0 - (player.engineOutput || 0)) * Math.min(1, dt * 7);
+    player.enginePulse += dt * 2.6;
+    player.reviveCost = multiplayerRunActive() ? multiplayerReviveCost() : 0;
+    updateShieldDepletedWarning(player);
+    updateHullCriticalWarning(player);
+    return;
+  }
   const move = applyPlayerControlModifiers(getMoveVector(), player);
   const enemySlowMultiplier = playerEnemySlowMultiplier();
   player.enemySlowMultiplier = enemySlowMultiplier;
@@ -9643,6 +9807,7 @@ function spawnOrbitalStrike() {
 
 function updateAugmentSystems(dt) {
   const player = state.player;
+  if (!player || player.downed) return;
   const formation = droneFormationProfile(player);
   const missileRadius = formation.combatCount > 0 ? formation.combatRadius + 28 : 84;
   const missileTangentialSpeed = formation.combatRadius * formation.combatAngularSpeed;
@@ -10393,6 +10558,7 @@ function updatePhotonPhazer(dt) {
 
 function updateWeapons(dt) {
   const player = state.player;
+  if (!player || player.downed) return;
   if ((player.disabledTimer || 0) > 0) {
     const phazer = player.weapons.photonPhazer;
     phazer.target = null;
@@ -10624,6 +10790,7 @@ function updateProjectiles(dt) {
 }
 
 function updateOrbitBlades() {
+  if (state.player?.downed) return;
   if ((state.player?.disabledTimer || 0) > 0) return;
   const { orbitBlades } = state.player.weapons;
   if (orbitBlades.level <= 0) return;
@@ -10712,32 +10879,128 @@ function triggerDamageFlash(type, amount) {
   );
 }
 
-function activeCombatPilots() {
+function allCombatPilots() {
   const pilots = [state.player];
   if (multiplayerRunHost()) {
     pilots.push(...Object.values(multiplayerRuntime().remotePilots || {}));
   }
-  return pilots.filter(pilot => pilot && pilot.alive !== false && (pilot.hp || 0) > 0);
+  return pilots.filter(Boolean);
+}
+
+function activeCombatPilots() {
+  return allCombatPilots().filter(pilot => pilot.alive !== false && !pilot.downed && (pilot.hp || 0) > 0);
 }
 
 function nearestCombatPilot(entity, range = Infinity, options = {}) {
-  const candidates = activeCombatPilots().filter(pilot => {
-    if (options.exclude && pilot === options.exclude) return false;
-    if (options.requireNotInvulnerable && (pilot.invuln || 0) > 0) return false;
-    return distance(entity, pilot) <= range;
-  });
+  const candidates = activeCombatPilots().map(pilot => {
+    if (options.exclude && pilot === options.exclude) return null;
+    if (options.requireNotInvulnerable && (pilot.invuln || 0) > 0) return null;
+    const distanceToPilot = distance(entity, pilot);
+    if (distanceToPilot > range) return null;
+    return {
+      pilot,
+      distance: distanceToPilot,
+      durability: (pilot.hp || 0) + (pilot.shield || 0),
+      healthRatio: ((pilot.hp || 0) + (pilot.shield || 0)) / Math.max(1, (pilot.maxHp || 1) + (pilot.maxShield || 0)),
+    };
+  }).filter(Boolean);
   if (!candidates.length) return null;
-  candidates.sort((a, b) => distance(entity, a) - distance(entity, b));
-  return candidates[0];
+  const nearestDistance = Math.min(...candidates.map(entry => entry.distance));
+  candidates.sort((a, b) => {
+    const aClose = a.distance <= nearestDistance + MULTIPLAYER_TARGET_HEALTH_PRIORITY_RANGE;
+    const bClose = b.distance <= nearestDistance + MULTIPLAYER_TARGET_HEALTH_PRIORITY_RANGE;
+    if (aClose && bClose) {
+      if (Math.abs(a.durability - b.durability) > 0.0001) return a.durability - b.durability;
+      if (Math.abs(a.healthRatio - b.healthRatio) > 0.0001) return a.healthRatio - b.healthRatio;
+    }
+    if (Math.abs(a.distance - b.distance) > 0.0001) return a.distance - b.distance;
+    if (Math.abs(a.durability - b.durability) > 0.0001) return a.durability - b.durability;
+    if (Math.abs(a.healthRatio - b.healthRatio) > 0.0001) return a.healthRatio - b.healthRatio;
+    return 0;
+  });
+  return candidates[0]?.pilot || null;
 }
 
 function localPilotEntity(pilot) {
   return pilot === state.player;
 }
 
+function multiplayerPilotsCanRevive() {
+  return multiplayerRunHost() && currentTeamVoyagePlayerRoster().length > 1;
+}
+
+function allCombatPilotsDown() {
+  const pilots = allCombatPilots().filter(Boolean);
+  return pilots.length > 0 && pilots.every(pilot => pilot.downed || (pilot.hp || 0) <= 0 || pilot.alive === false);
+}
+
+function setPilotDowned(pilot) {
+  if (!pilot || pilot.downed) return;
+  pilot.hp = 0;
+  pilot.shield = 0;
+  pilot.downed = true;
+  pilot.reviveProgress = 0;
+  pilot.reviveCost = multiplayerReviveCost();
+  pilot.boosting = false;
+  pilot.thrusting = false;
+  pilot.vx = 0;
+  pilot.vy = 0;
+  pilot.invuln = 0;
+  pilot.dashTimer = 0;
+  pilot.disabledTimer = 0;
+  pilot.hackInfectionTimer = 0;
+  pilot.engineOutput = 0;
+  floatingText(pilot.x, pilot.y - 42, "DOWNED", "#ffb2b2", 0.9);
+}
+
+function revivePilot(pilot, reviver) {
+  if (!pilot) return;
+  const reviveCost = multiplayerReviveCost();
+  state.gold = Math.max(0, state.gold - reviveCost);
+  state.currentRun.reviveCount = Math.max(0, (state.currentRun.reviveCount || 0) + 1);
+  pilot.downed = false;
+  pilot.reviveProgress = 0;
+  pilot.reviveCost = multiplayerReviveCost();
+  pilot.hp = Math.max(1, Math.ceil(pilot.maxHp * 0.45));
+  pilot.shield = Math.min(pilot.maxShield || 0, Math.ceil((pilot.maxShield || 0) * 0.35));
+  pilot.invuln = 2;
+  pilot.shieldRegenDelay = 1.6;
+  pilot.disabledTimer = 0;
+  pilot.engineOutput = 0.4;
+  pilot.vx = 0;
+  pilot.vy = 0;
+  floatingText(pilot.x, pilot.y - 54, `REVIVED -${reviveCost}`, "#a6ffda", 0.95);
+  if (reviver) {
+    floatingText(reviver.x, reviver.y - 46, `Revive ${reviveCost}`, "#8af6ff", 0.7);
+  }
+}
+
+function updateMultiplayerRevives(dt) {
+  if (!multiplayerPilotsCanRevive() || state.mode !== "playing") return;
+  const livingPilots = activeCombatPilots();
+  for (const pilot of allCombatPilots()) {
+    if (!pilot?.downed) continue;
+    const reviveCost = multiplayerReviveCost();
+    pilot.reviveCost = reviveCost;
+    const reviver = livingPilots
+      .filter(candidate => candidate !== pilot && distance(candidate, pilot) <= MULTIPLAYER_REVIVE_RANGE + candidate.radius)
+      .sort((a, b) => distance(a, pilot) - distance(b, pilot))[0];
+    if (!reviver || state.gold < reviveCost) {
+      pilot.reviveProgress = Math.max(0, (pilot.reviveProgress || 0) - dt * 1.5);
+      continue;
+    }
+    pilot.reviveProgress = Math.min(MULTIPLAYER_REVIVE_HOLD_TIME, (pilot.reviveProgress || 0) + dt);
+    if (pilot.reviveProgress >= MULTIPLAYER_REVIVE_HOLD_TIME) {
+      revivePilot(pilot, reviver);
+    }
+  }
+}
+
 function hurtPilot(amount, source = null, pilot = state.player) {
   const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
+  if (multiplayerRunClient() && !localPilotEntity(player)) return;
+  if (player.downed) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
 
@@ -10801,7 +11064,12 @@ function hurtPilot(amount, source = null, pilot = state.player) {
     floatingText(player.x, player.y - 58, "Emergency Shield", "#8af6ff", 0.7);
   }
   if (player.hp <= 0) {
-    if (localPilotEntity(player)) {
+    if (multiplayerRunHost()) {
+      setPilotDowned(player);
+      if (allCombatPilotsDown()) {
+        beginPlayerDeathSequence(finalizePlayerFailureRewards());
+      }
+    } else if (localPilotEntity(player)) {
       player.hp = 0;
       beginPlayerDeathSequence(finalizePlayerFailureRewards());
     } else {
@@ -10819,6 +11087,8 @@ function hurtPilot(amount, source = null, pilot = state.player) {
 function hurtPilotShieldOnly(amount, source = null, pilot = state.player) {
   const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
+  if (multiplayerRunClient() && !localPilotEntity(player)) return;
+  if (player.downed) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
 
@@ -10847,6 +11117,8 @@ function hurtPilotShieldOnly(amount, source = null, pilot = state.player) {
 function hurtPilotHullOnly(amount, source = null, pilot = state.player) {
   const player = pilot;
   if (!player || state.mode === "death" || player.deathSequence?.active) return;
+  if (multiplayerRunClient() && !localPilotEntity(player)) return;
+  if (player.downed) return;
   if (player.invuln > 0) return;
   if (amount <= 0) return;
 
@@ -10882,7 +11154,12 @@ function hurtPilotHullOnly(amount, source = null, pilot = state.player) {
     floatingText(player.x, player.y - 58, "Emergency Shield", "#8af6ff", 0.7);
   }
   if (player.hp <= 0) {
-    if (localPilotEntity(player)) {
+    if (multiplayerRunHost()) {
+      setPilotDowned(player);
+      if (allCombatPilotsDown()) {
+        beginPlayerDeathSequence(finalizePlayerFailureRewards());
+      }
+    } else if (localPilotEntity(player)) {
       player.hp = 0;
       beginPlayerDeathSequence(finalizePlayerFailureRewards());
     } else {
@@ -11003,6 +11280,7 @@ function updateEnemies(dt) {
     const pursuitTarget = hackedTarget || nearestCombatPilot(enemy);
     if (!pursuitTarget) continue;
     const angle = Math.atan2(pursuitTarget.y - enemy.y, pursuitTarget.x - enemy.x);
+    enemy.facing = angle;
     let moveX = Math.cos(angle);
     let moveY = Math.sin(angle);
     const separation = enemySeparationVector(enemy, separationGrid);
@@ -11633,12 +11911,20 @@ function update(dt) {
         state.player.engineOutput += (0 - (state.player.engineOutput || 0)) * Math.min(1, dt * 4.5);
       }
       if (Number.isFinite(state.player.netTargetX) && Number.isFinite(state.player.netTargetY)) {
-        const correctionBlend = Math.min(1, dt * 7);
-        state.player.x += (state.player.netTargetX - state.player.x) * correctionBlend;
-        state.player.y += (state.player.netTargetY - state.player.y) * correctionBlend;
-        if (!localAction && Math.hypot(state.player.netTargetX - state.player.x, state.player.netTargetY - state.player.y) < 4.5) {
+        const dx = state.player.netTargetX - state.player.x;
+        const dy = state.player.netTargetY - state.player.y;
+        const correctionDistance = Math.hypot(dx, dy);
+        if (!localAction && correctionDistance < 12) {
           state.player.x = state.player.netTargetX;
           state.player.y = state.player.netTargetY;
+          state.player.prevX = state.player.x;
+          state.player.prevY = state.player.y;
+          state.player.vx = 0;
+          state.player.vy = 0;
+        } else {
+          const correctionBlend = Math.min(1, dt * 7);
+          state.player.x += dx * correctionBlend;
+          state.player.y += dy * correctionBlend;
         }
       }
     }
@@ -11661,7 +11947,13 @@ function update(dt) {
   }
   const move = applyPlayerControlModifiers(getMoveVector(), state.player);
   const playerSpeed = state.player ? Math.hypot(state.player.vx, state.player.vy) : 0;
-  const voyageAdvancing = Boolean(state.player) && (move.active || playerSpeed > 18 || state.player.dashTimer > 0);
+  const voyageAdvancing = multiplayerRunHost()
+    ? activeCombatPilots().some(pilot => {
+      const pilotSpeed = Math.hypot(pilot.vx || 0, pilot.vy || 0);
+      const pilotMoveActive = pilot === state.player ? move.active : Boolean(pilot.input?.active);
+      return !pilot.downed && (pilotMoveActive || pilotSpeed > 18 || (pilot.dashTimer || 0) > 0);
+    })
+    : Boolean(state.player) && !state.player.downed && (move.active || playerSpeed > 18 || state.player.dashTimer > 0);
   state.player.weaponSwitchCooldown = Math.max(0, (state.player.weaponSwitchCooldown || 0) - dt);
   if (voyageAdvancing) {
     state.voyageProgress = Math.min(state.currentRun.goalTime, state.voyageProgress + dt);
@@ -11753,6 +12045,7 @@ function update(dt) {
   updatePulses(dt);
   updateLootCrates(dt);
   updateGems(dt);
+  updateMultiplayerRevives(dt);
   updateEffects(dt);
   updateCamera(dt);
   syncHud();
@@ -12028,12 +12321,96 @@ function drawBackground() {
   drawScreenStarfield(ventari, time);
 }
 
+function drawDownedPilotWreck(pilot, labelText = "DOWNED") {
+  const angle = (pilot.facing || 0) + Math.PI / 2;
+  const reviveProgress = clamp((pilot.reviveProgress || 0) / MULTIPLAYER_REVIVE_HOLD_TIME, 0, 1);
+  ctx.save();
+  ctx.translate(pilot.x, pilot.y);
+  ctx.rotate(angle);
+
+  ctx.fillStyle = "rgba(255, 120, 120, 0.16)";
+  ctx.beginPath();
+  ctx.ellipse(0, 10, 22, 14, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#3a2630";
+  ctx.beginPath();
+  ctx.moveTo(-14, -10);
+  ctx.lineTo(-2, 10);
+  ctx.lineTo(-18, 14);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "#4a2d38";
+  ctx.beginPath();
+  ctx.moveTo(14, -10);
+  ctx.lineTo(2, 10);
+  ctx.lineTo(18, 14);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "#181d2a";
+  ctx.beginPath();
+  ctx.moveTo(0, -14);
+  ctx.lineTo(8, 8);
+  ctx.lineTo(0, 4);
+  ctx.lineTo(-8, 8);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(255, 170, 170, 0.78)";
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(-8, -2);
+  ctx.lineTo(8, 6);
+  ctx.moveTo(-4, 10);
+  ctx.lineTo(5, -3);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(120, 200, 255, 0.24)";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(pilot.x, pilot.y, 28, -Math.PI / 2, Math.PI * 1.5);
+  ctx.stroke();
+  if (reviveProgress > 0.001) {
+    ctx.strokeStyle = "rgba(138, 246, 255, 0.92)";
+    ctx.lineWidth = 4.8;
+    ctx.beginPath();
+    ctx.arc(pilot.x, pilot.y, 28, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * reviveProgress);
+    ctx.stroke();
+  }
+  ctx.font = "700 11px Rajdhani, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffd7d7";
+  ctx.strokeStyle = "rgba(6, 14, 28, 0.86)";
+  ctx.lineWidth = 3;
+  ctx.strokeText(labelText, pilot.x, pilot.y - 34);
+  ctx.fillText(labelText, pilot.x, pilot.y - 34);
+  if (pilot.reviveCost > 0) {
+    const reviveText = state.gold >= pilot.reviveCost
+      ? `Revive ${pilot.reviveCost} Credits`
+      : `Need ${pilot.reviveCost} Credits`;
+    ctx.font = "600 10px Rajdhani, sans-serif";
+    ctx.strokeText(reviveText, pilot.x, pilot.y + 42);
+    ctx.fillStyle = state.gold >= pilot.reviveCost ? "#9ef9ff" : "#ffb4b4";
+    ctx.fillText(reviveText, pilot.x, pilot.y + 42);
+  }
+  ctx.restore();
+}
+
 function drawNetworkPilots() {
   const remotes = Object.values(multiplayerRuntime().remotePilots || {});
   if (!remotes.length) return;
 
   for (const pilot of remotes) {
     if (!pilot) continue;
+    if (pilot.downed) {
+      drawDownedPilotWreck(pilot, `${pilot.name || "Wing"} Downed`);
+      continue;
+    }
     const primaryId = pilot.primaryWeapon || "emberBolt";
     const accent = primaryId === "plasmaCannon" ? "#7ae0ff" : "#ffd585";
     const hullColor = "#16243b";
@@ -12162,6 +12539,10 @@ function drawNetworkPilots() {
 
 function drawPlayer() {
   const player = state.player;
+  if (player?.downed) {
+    drawDownedPilotWreck(player, "Downed");
+    return;
+  }
   if (player.deathSequence?.hidden) return;
   if (player.deathSequence?.active) {
     const death = player.deathSequence;
@@ -12807,7 +13188,7 @@ function drawEnemyShip(enemy) {
   ) {
     return;
   }
-  const angle = Math.atan2(state.player.y - enemy.y, state.player.x - enemy.x) + Math.PI / 2;
+  const angle = (enemy.facing ?? Math.atan2(state.player.y - enemy.y, state.player.x - enemy.x)) + Math.PI / 2;
   const sprite = enemySpriteFor(enemy);
   drawEnemyAura(enemy);
   ctx.save();

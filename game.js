@@ -5075,8 +5075,8 @@ function setupMusicSystem() {
   ];
   const deathTrack = new Audio("Assets/SFX/Death SFX.mp3");
   const hubTracks = [
-    new Audio("freesound_community-space-ship-bridge-loop-104525.mp3"),
-    new Audio("freesound_community-space-ship-bridge-loop-104525.mp3"),
+    new Audio("nikitakondrashev-space-440026.mp3"),
+    new Audio("nikitakondrashev-space-440026.mp3"),
   ];
   const lobbyTrack = new Audio("nikitakondrashev-space-440026.mp3");
   for (const track of hubTracks) {

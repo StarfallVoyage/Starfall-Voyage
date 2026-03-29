@@ -64,6 +64,7 @@ const teamVoyageMenu = document.getElementById("team-voyage-menu");
 const teamVoyageBack = document.getElementById("team-voyage-back");
 const teamVoyageHost = document.getElementById("team-voyage-host");
 const teamVoyageJoin = document.getElementById("team-voyage-join");
+const teamVoyageBay = document.getElementById("team-voyage-bay");
 const teamVoyageStatus = document.getElementById("team-voyage-status");
 const teamVoyageServerUrl = document.getElementById("team-voyage-server-url");
 const teamVoyagePlayerName = document.getElementById("team-voyage-player-name");
@@ -429,6 +430,8 @@ const state = {
       inputClock: 0,
       snapshotClock: 0,
       pendingDash: false,
+      pendingSessionMode: null,
+      pendingSessionModeUntil: 0,
     },
   },
   sceneTransitionActive: false,
@@ -3872,10 +3875,26 @@ function broadcastSessionMode(mode) {
   });
 }
 
+function setPendingSessionMode(mode) {
+  if (!multiplayerRunClient()) return;
+  const runtime = multiplayerRuntime();
+  runtime.pendingSessionMode = mode;
+  runtime.pendingSessionModeUntil = performance.now() + 450;
+}
+
+function clearPendingSessionMode(mode = null) {
+  const runtime = multiplayerRuntime();
+  if (!runtime) return;
+  if (mode && runtime.pendingSessionMode !== mode) return;
+  runtime.pendingSessionMode = null;
+  runtime.pendingSessionModeUntil = 0;
+}
+
 function pauseVoyage(sync = true) {
   if (state.mode !== "playing") return;
   applySharedVoyageMenuState("paused");
   if (sync) {
+    setPendingSessionMode("paused");
     broadcastSessionMode("paused");
   }
 }
@@ -3884,6 +3903,7 @@ function resumeVoyage(sync = true) {
   if (state.mode !== "paused") return;
   applySharedVoyageMenuState("playing");
   if (sync) {
+    setPendingSessionMode("playing");
     broadcastSessionMode("playing");
   }
 }
@@ -3892,6 +3912,7 @@ function openVoyageUpgradesMenu(sync = true) {
   if (state.mode !== "playing" || !state.player) return;
   applySharedVoyageMenuState("voyageupgrades");
   if (sync) {
+    setPendingSessionMode("voyageupgrades");
     broadcastSessionMode("voyageupgrades");
   }
 }
@@ -3900,6 +3921,7 @@ function closeVoyageUpgradesMenu(sync = true) {
   if (!voyageUpgradeMenuActive()) return;
   applySharedVoyageMenuState("playing");
   if (sync) {
+    setPendingSessionMode("playing");
     broadcastSessionMode("playing");
   }
 }
@@ -6211,6 +6233,8 @@ function clearMultiplayerRuntime() {
     inputClock: 0,
     snapshotClock: 0,
     pendingDash: false,
+    pendingSessionMode: null,
+    pendingSessionModeUntil: 0,
   };
 }
 
@@ -6584,7 +6608,17 @@ function smoothSnapshotPilot(target, dt, snapFactor = 10) {
 
 function applyWorldSnapshot(snapshot) {
   if (!multiplayerRunClient() || !snapshot) return;
-  if (["playing", "paused", "voyageupgrades"].includes(snapshot.phase || "")) {
+  const runtime = multiplayerRuntime();
+  const snapshotPhase = snapshot.phase || "";
+  const pendingModeActive = runtime.pendingSessionMode && performance.now() < runtime.pendingSessionModeUntil;
+  if (pendingModeActive && snapshotPhase && snapshotPhase !== runtime.pendingSessionMode) {
+    // Ignore one stale mode snapshot while the host catches up to a just-requested shared menu state.
+  } else if (["playing", "paused", "voyageupgrades"].includes(snapshotPhase)) {
+    if (snapshotPhase === runtime.pendingSessionMode) {
+      clearPendingSessionMode(snapshotPhase);
+    } else if (performance.now() >= runtime.pendingSessionModeUntil) {
+      clearPendingSessionMode();
+    }
     applySharedVoyageMenuState(snapshot.phase);
   }
   state.time = snapshot.time || 0;
@@ -6704,8 +6738,12 @@ function updateRemotePilot(pilot, dt) {
   pilot.thrusting = Boolean(input.active);
   pilot.prevX = pilot.x;
   pilot.prevY = pilot.y;
+  pilot.invuln = Math.max(0, (pilot.invuln || 0) - dt);
   pilot.dashCooldown = Math.max(0, pilot.dashCooldown - dt);
   pilot.dashTimer = Math.max(0, pilot.dashTimer - dt);
+  pilot.shieldRegenDelay = Math.max(0, (pilot.shieldRegenDelay || 0) - dt);
+  pilot.disabledTimer = Math.max(0, (pilot.disabledTimer || 0) - dt);
+  pilot.hackInfectionTimer = Math.max(0, (pilot.hackInfectionTimer || 0) - dt);
   if (pilot.dashTimer > 0) {
     pilot.invuln = Math.max(pilot.invuln || 0, pilot.dashTimer);
   }
@@ -6745,6 +6783,19 @@ function updateRemotePilot(pilot, dt) {
     pilot.facing = Math.atan2(pilot.vy, pilot.vx);
   }
   pilot.rotation = pilot.facing + Math.PI / 2;
+  pilot.regenTick = (pilot.regenTick || 0) + dt;
+  if (pilot.regenTick >= 1) {
+    pilot.regenTick -= 1;
+    if (pilot.hullRegen > 0) {
+      pilot.hp = Math.min(pilot.maxHp, pilot.hp + pilot.hullRegen);
+    }
+    if ((pilot.passives?.recovery || 0) > 0 && pilot.maxShield > 0) {
+      pilot.shield = Math.min(pilot.maxShield, pilot.shield + pilot.passives.recovery);
+    }
+  }
+  if (pilot.maxShield > 0 && (pilot.shieldRegenDelay || 0) <= 0) {
+    pilot.shield = Math.min(pilot.maxShield, pilot.shield + (pilot.shieldRegenRate || 0) * dt);
+  }
   const thrustVisual = Math.min(1, (input.active ? 0.28 : 0) + (pilot.boosting ? 0.72 : 0) + (pilot.dashTimer > 0 ? 0.82 : 0));
   pilot.engineOutput += (thrustVisual - pilot.engineOutput) * Math.min(1, dt * (thrustVisual > pilot.engineOutput ? 14 : 6));
   pilot.enginePulse += dt * (pilot.boosting ? 16 : 9) * (0.55 + pilot.engineOutput * 0.65);
@@ -6913,6 +6964,7 @@ function handleMultiplayerClientEvent(from, payload) {
       return;
     }
     if (multiplayerRunClient()) {
+      clearPendingSessionMode(nextMode);
       applySharedVoyageMenuState(nextMode);
     }
     return;
@@ -7085,6 +7137,10 @@ function renderTeamVoyageLobby() {
   if (teamVoyageJoin) {
     teamVoyageJoin.disabled = state.multiplayer.connecting || connected;
     teamVoyageJoin.dataset.instantConfirm = "true";
+  }
+  if (teamVoyageBay) {
+    teamVoyageBay.disabled = connected;
+    teamVoyageBay.dataset.instantConfirm = "true";
   }
   renderTeamVoyagePlayers();
   updateTeamVoyageBackLabel();
@@ -11478,7 +11534,7 @@ function update(dt) {
         const correctionBlend = Math.min(1, dt * 7);
         state.player.x += (state.player.netTargetX - state.player.x) * correctionBlend;
         state.player.y += (state.player.netTargetY - state.player.y) * correctionBlend;
-        if (!localAction && Math.hypot(state.player.netTargetX - state.player.x, state.player.netTargetY - state.player.y) < 1.2) {
+        if (!localAction && Math.hypot(state.player.netTargetX - state.player.x, state.player.netTargetY - state.player.y) < 4.5) {
           state.player.x = state.player.netTargetX;
           state.player.y = state.player.netTargetY;
         }
@@ -13511,6 +13567,10 @@ teamVoyageHost?.addEventListener("click", () => {
 
 teamVoyageJoin?.addEventListener("click", () => {
   joinTeamVoyage();
+});
+
+teamVoyageBay?.addEventListener("click", () => {
+  showHangar("Co-op engineering profile active. Upgrade your multiplayer ship, then return to the main menu and reopen Team Voyage when ready.");
 });
 
 teamVoyageServerUrl?.addEventListener("input", event => {

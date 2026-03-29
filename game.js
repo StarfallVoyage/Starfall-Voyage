@@ -101,6 +101,7 @@ const hangarSfxVolume = document.getElementById("hangar-sfx-volume");
 const hangarSfxVolumeReadout = document.getElementById("hangar-sfx-volume-readout");
 const hangarOtherSfxVolume = document.getElementById("hangar-other-sfx-volume");
 const hangarOtherSfxVolumeReadout = document.getElementById("hangar-other-sfx-volume-readout");
+const hangarReturnMainMenu = document.getElementById("hangar-return-main-menu");
 const hangarResetProgress = document.getElementById("hangar-reset-progress");
 const hangarUpgradesMenu = document.getElementById("hangar-upgrades-menu");
 const hangarRecordsMenu = document.getElementById("hangar-records-menu");
@@ -174,11 +175,11 @@ const HANGAR_UPGRADE_LEVEL_CAP = 100;
 const INFINITE_RUN_UPGRADE_LEVEL = Number.POSITIVE_INFINITY;
 const WEAPON_SWITCH_COOLDOWN = 1;
 const WEAPON_SWITCH_FIRE_DELAY = 0.16;
-const MULTIPLAYER_INPUT_INTERVAL = 0.05;
-const MULTIPLAYER_SNAPSHOT_INTERVAL = 0.1;
-const MULTIPLAYER_SYNC_RANGE = 1180;
-const MULTIPLAYER_SYNC_PROJECTILE_CAP = 180;
-const MULTIPLAYER_SYNC_ENEMY_CAP = 260;
+const MULTIPLAYER_INPUT_INTERVAL = 0.06;
+const MULTIPLAYER_SNAPSHOT_INTERVAL = 0.16;
+const MULTIPLAYER_SYNC_RANGE = 960;
+const MULTIPLAYER_SYNC_PROJECTILE_CAP = 90;
+const MULTIPLAYER_SYNC_ENEMY_CAP = 120;
 const MAX_SLOW_FIELD_RADIUS = 210;
 const PLANET_SPAWN_INTERVAL = 90;
 const PLANET_SPAWN_CHANCE = 0.25;
@@ -191,6 +192,7 @@ const BASE_REPEAT_CRUDE_CACHE_CHANCE = 0.34;
 const ASTEROID_DAMAGE_START_DIFFICULTY = 3;
 const CAMERA_ZOOM = 0.68;
 const META_STORAGE_KEY = "starfall-survivors-meta-v2";
+const COOP_META_STORAGE_KEY = "starfall-survivors-meta-coop-v1";
 const MULTIPLAYER_SERVER_STORAGE_KEY = "starfall-survivors-multiplayer-server";
 const MULTIPLAYER_NAME_STORAGE_KEY = "starfall-survivors-multiplayer-name";
 const BASE_BOOST_CAPACITY = 50;
@@ -302,6 +304,7 @@ const PLAYER_DEATH_SEQUENCE_TIME = 4.1;
 
 const state = {
   mode: "menu",
+  profileMode: "solo",
   keys: new Set(),
   pointerActive: false,
   pointerVector: { x: 0, y: 0 },
@@ -408,6 +411,7 @@ const state = {
     playerId: null,
     hostId: null,
     players: [],
+    playerProfiles: {},
     lobbySettings: {
       route: "asteroidBelt",
       difficulty: 1,
@@ -3900,6 +3904,103 @@ function defaultMetaProgression() {
   };
 }
 
+function currentMetaStorageKey() {
+  return state.profileMode === "coop" ? COOP_META_STORAGE_KEY : META_STORAGE_KEY;
+}
+
+function normalizeMetaProgression(parsed) {
+  const base = defaultMetaProgression();
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const legacyPhaseDashLevel = Number(source.upgrades?.phaseDash) || Number(source.upgrades?.dodgeSpins) || 0;
+  const legacySlowingFieldLevel = Number(source.upgrades?.slowingField) || 0;
+  const legacyElementalIncreaseLevel = Number(source.upgrades?.elementalIncrease) || 0;
+  const upgrades = {};
+  for (const id of Object.keys(base.upgrades)) {
+    upgrades[id] = id === "phaseDash"
+      ? legacyPhaseDashLevel
+      : (id === "elementalProcChance" || id === "elementalDamage" || id === "elementalDuration")
+        ? Number(source.upgrades?.[id] ?? legacyElementalIncreaseLevel) || 0
+        : Number(source.upgrades?.[id]) || 0;
+  }
+  const unlockedSet = new Set(
+    Array.isArray(source.unlockedAugments)
+      ? source.unlockedAugments.filter(id => augmentDefs[id])
+      : []
+  );
+  if (Array.isArray(source.equippedAugments)) {
+    for (const id of source.equippedAugments) {
+      if (augmentDefs[id]) unlockedSet.add(id);
+    }
+  }
+  if (legacySlowingFieldLevel > 0) {
+    unlockedSet.add("slowingField");
+  }
+  const validHostileIds = new Set(HOSTILE_INTEL_DEFS.map(hostile => hostile.id));
+  const discoveredHostiles = Array.isArray(source.discoveredHostiles)
+    ? source.discoveredHostiles.filter(id => validHostileIds.has(id))
+    : [];
+  const clearedVoyageRewardCombos = Array.isArray(source.clearedVoyageRewardCombos)
+    ? source.clearedVoyageRewardCombos.filter(entry => typeof entry === "string")
+    : [];
+  const unlockedAugments = Array.from(unlockedSet);
+  const equippedAugments = Array.isArray(source.equippedAugments)
+    ? source.equippedAugments.filter(id => unlockedSet.has(id)).slice(0, MAX_EQUIPPED_AUGMENTS)
+    : [];
+  const legacyAugmentCaches = Number(source.augmentCaches) || 0;
+  const estimatedUpgradeSpend = estimateMetaUpgradeInvestment(upgrades);
+  const earnedMinusBank = Math.max(0, (Number(source.totals?.creditsEarned) || 0) - (Number(source.goldBank) || 0));
+  const parsedUpgradeSpend = Number(source.upgradeCreditsSpent);
+  return {
+    goldBank: Number(source.goldBank) || 0,
+    upgradeCreditsSpent: Number.isFinite(parsedUpgradeSpend) ? Math.max(0, parsedUpgradeSpend) : Math.max(estimatedUpgradeSpend, earnedMinusBank),
+    crudeAugmentCaches: Number(source.crudeAugmentCaches) || legacyAugmentCaches,
+    ardonisAugmentCaches: Number(source.ardonisAugmentCaches) || 0,
+    clearedVoyageRewardCombos,
+    discoveredHostiles,
+    unlockedAugments,
+    equippedAugments,
+    upgrades,
+    settings: {
+      musicVolume: clamp(Number(source.settings?.musicVolume ?? base.settings.musicVolume), 0, 1),
+      gunSfxVolume: clamp(Number(source.settings?.gunSfxVolume ?? source.settings?.sfxVolume ?? base.settings.gunSfxVolume), 0, 1),
+      otherSfxVolume: clamp(Number(source.settings?.otherSfxVolume ?? source.settings?.sfxVolume ?? base.settings.otherSfxVolume), 0, 1),
+    },
+    totals: { ...base.totals, ...(source.totals || {}) },
+  };
+}
+
+function switchMetaProfile(mode, options = {}) {
+  const nextMode = mode === "coop" ? "coop" : "solo";
+  if (state.profileMode === nextMode && !options.forceReload) return;
+  const preservedSettings = {
+    musicVolume: clamp(Number(state.settings?.musicVolume ?? 0.8), 0, 1),
+    gunSfxVolume: clamp(Number(state.settings?.gunSfxVolume ?? 0.8), 0, 1),
+    otherSfxVolume: clamp(Number(state.settings?.otherSfxVolume ?? 0.8), 0, 1),
+  };
+  state.profileMode = nextMode;
+  state.meta = loadMetaProgression();
+  state.settings = {
+    ...state.settings,
+    ...(state.meta?.settings || preservedSettings),
+  };
+  if (options.preserveAudio !== false) {
+    state.settings = {
+      ...state.settings,
+      ...preservedSettings,
+    };
+    state.meta.settings = {
+      ...state.meta.settings,
+      ...preservedSettings,
+    };
+  }
+  applyAudioSettings();
+  renderMetaUpgrades();
+  renderAugmentBay();
+  renderHostileDataMenu();
+  syncHangarRunConfig();
+  syncHud();
+}
+
 function freshRunStats() {
   return {
     damageDealt: 0,
@@ -4247,66 +4348,9 @@ function bindDiscretePress(button, handler) {
 
 function loadMetaProgression() {
   try {
-    const raw = localStorage.getItem(META_STORAGE_KEY);
-    const base = defaultMetaProgression();
-    if (!raw) return base;
-    const parsed = JSON.parse(raw);
-    const legacyPhaseDashLevel = Number(parsed.upgrades?.phaseDash) || Number(parsed.upgrades?.dodgeSpins) || 0;
-    const legacySlowingFieldLevel = Number(parsed.upgrades?.slowingField) || 0;
-    const legacyElementalIncreaseLevel = Number(parsed.upgrades?.elementalIncrease) || 0;
-    const upgrades = {};
-    for (const id of Object.keys(base.upgrades)) {
-      upgrades[id] = id === "phaseDash"
-        ? legacyPhaseDashLevel
-        : (id === "elementalProcChance" || id === "elementalDamage" || id === "elementalDuration")
-          ? Number(parsed.upgrades?.[id] ?? legacyElementalIncreaseLevel) || 0
-        : Number(parsed.upgrades?.[id]) || 0;
-    }
-    const unlockedSet = new Set(
-      Array.isArray(parsed.unlockedAugments)
-        ? parsed.unlockedAugments.filter(id => augmentDefs[id])
-        : []
-    );
-    if (Array.isArray(parsed.equippedAugments)) {
-      for (const id of parsed.equippedAugments) {
-        if (augmentDefs[id]) unlockedSet.add(id);
-      }
-    }
-    if (legacySlowingFieldLevel > 0) {
-      unlockedSet.add("slowingField");
-    }
-    const validHostileIds = new Set(HOSTILE_INTEL_DEFS.map(hostile => hostile.id));
-    const discoveredHostiles = Array.isArray(parsed.discoveredHostiles)
-      ? parsed.discoveredHostiles.filter(id => validHostileIds.has(id))
-      : [];
-    const clearedVoyageRewardCombos = Array.isArray(parsed.clearedVoyageRewardCombos)
-      ? parsed.clearedVoyageRewardCombos.filter(entry => typeof entry === "string")
-      : [];
-    const unlockedAugments = Array.from(unlockedSet);
-    const equippedAugments = Array.isArray(parsed.equippedAugments)
-      ? parsed.equippedAugments.filter(id => unlockedSet.has(id)).slice(0, MAX_EQUIPPED_AUGMENTS)
-      : [];
-    const legacyAugmentCaches = Number(parsed.augmentCaches) || 0;
-    const estimatedUpgradeSpend = estimateMetaUpgradeInvestment(upgrades);
-    const earnedMinusBank = Math.max(0, (Number(parsed.totals?.creditsEarned) || 0) - (Number(parsed.goldBank) || 0));
-    const parsedUpgradeSpend = Number(parsed.upgradeCreditsSpent);
-    return {
-      goldBank: Number(parsed.goldBank) || 0,
-      upgradeCreditsSpent: Number.isFinite(parsedUpgradeSpend) ? Math.max(0, parsedUpgradeSpend) : Math.max(estimatedUpgradeSpend, earnedMinusBank),
-      crudeAugmentCaches: Number(parsed.crudeAugmentCaches) || legacyAugmentCaches,
-      ardonisAugmentCaches: Number(parsed.ardonisAugmentCaches) || 0,
-      clearedVoyageRewardCombos,
-      discoveredHostiles,
-      unlockedAugments,
-      equippedAugments,
-      upgrades,
-      settings: {
-        musicVolume: clamp(Number(parsed.settings?.musicVolume ?? base.settings.musicVolume), 0, 1),
-        gunSfxVolume: clamp(Number(parsed.settings?.gunSfxVolume ?? parsed.settings?.sfxVolume ?? base.settings.gunSfxVolume), 0, 1),
-        otherSfxVolume: clamp(Number(parsed.settings?.otherSfxVolume ?? parsed.settings?.sfxVolume ?? base.settings.otherSfxVolume), 0, 1),
-      },
-      totals: { ...base.totals, ...(parsed.totals || {}) },
-    };
+    const raw = localStorage.getItem(currentMetaStorageKey());
+    if (!raw) return defaultMetaProgression();
+    return normalizeMetaProgression(JSON.parse(raw));
   } catch {
     return defaultMetaProgression();
   }
@@ -4314,7 +4358,7 @@ function loadMetaProgression() {
 
 function saveMetaProgression() {
   const payload = {
-    ...state.meta,
+    ...normalizeMetaProgression(state.meta),
     settings: {
       musicVolume: clamp(Number(state.settings?.musicVolume ?? 0.8), 0, 1),
       gunSfxVolume: clamp(Number(state.settings?.gunSfxVolume ?? 0.8), 0, 1),
@@ -4322,7 +4366,7 @@ function saveMetaProgression() {
     },
     augmentCaches: Number(state.meta?.crudeAugmentCaches) || 0,
   };
-  localStorage.setItem(META_STORAGE_KEY, JSON.stringify(payload));
+  localStorage.setItem(currentMetaStorageKey(), JSON.stringify(payload));
 }
 
 function persistAudioSettings() {
@@ -5524,7 +5568,7 @@ function gamepadMenuTargets() {
     return [hangarAugmentsBack, ...Array.from(hangarAugmentGrid.querySelectorAll("button:not([disabled])"))];
   }
   if (!hangarSettingsMenu.classList.contains("hidden")) {
-    return [hangarSettingsBack, hangarFullscreen, hangarMusicVolume, hangarSfxVolume, hangarOtherSfxVolume, hangarResetProgress];
+    return [hangarSettingsBack, hangarFullscreen, hangarMusicVolume, hangarSfxVolume, hangarOtherSfxVolume, hangarReturnMainMenu, hangarResetProgress];
   }
   if (!hangarUpgradesMenu.classList.contains("hidden")) {
     return [
@@ -6135,80 +6179,74 @@ function applyTeamVoyageRoomSettingsToRun(room) {
   syncHangarRunConfig();
 }
 
-function makeNetworkPilot(id, name, index = 0) {
+function makePlayerFromMetaProfile(metaProfile, startingWeapon) {
+  const previousMeta = state.meta;
+  const previousStartingWeapon = state.currentRun.startingWeapon;
+  state.meta = normalizeMetaProgression(metaProfile);
+  if (startingWeapon) {
+    state.currentRun.startingWeapon = startingWeapon;
+  }
+  const pilot = makePlayer();
+  state.meta = previousMeta;
+  state.currentRun.startingWeapon = previousStartingWeapon;
+  return pilot;
+}
+
+function currentMultiplayerProfilePayload() {
+  return {
+    meta: normalizeMetaProgression(state.meta),
+  };
+}
+
+function makeNetworkPilot(id, name, index = 0, profileMeta = null) {
   const offsetAngle = (Math.PI * 2 * index) / Math.max(1, currentTeamVoyagePlayerRoster().length + 1);
   const spawnDistance = 92;
   const x = WORLD_W / 2 + Math.cos(offsetAngle) * spawnDistance;
   const y = WORLD_H / 2 + Math.sin(offsetAngle) * spawnDistance;
   const startingWeapon = teamVoyageRoomSettings().startingWeapon || "emberBolt";
-  return {
-    id,
-    name: name || "Pilot",
-    x,
-    y,
-    prevX: x,
-    prevY: y,
-    radius: 14,
-    speed: 340,
-    thrustPower: 1180,
-    vx: 0,
-    vy: 0,
-    facing: 0,
-    rotation: 0,
-    thrusting: false,
-    boosting: false,
-    boostCharge: BASE_BOOST_CAPACITY,
-    boostMax: BASE_BOOST_CAPACITY,
-    boostDrainRate: 40,
-    boostRegenRate: 26,
-    boostExhaustedCooldown: 2,
-    boostCooldown: 0,
-    dashCooldown: 0,
-    dashTimer: 0,
-    dashDistanceMultiplier: 1,
-    dashStaminaCost: BASE_DASH_STAMINA_COST,
-    invuln: 0,
-    enginePulse: 0,
-    engineOutput: 0,
-    hp: 100,
-    maxHp: 100,
-    shield: 100,
-    maxShield: 100,
-    level: 1,
-    scrap: 0,
-    attackSpeedMultiplier: 1,
-    attackDamageMultiplier: 1,
-    photonLanceCycleMultiplier: 1,
-    photonLanceDamageMultiplier: 1,
-    plasmaCannonDamageMultiplier: 1,
-    plasmaCannonWaveMultiplier: 1,
-    rangeMultiplier: 1,
-    hubPierce: 0,
-    extraAttacks: 0,
-    dualBarrelChance: 0,
-    novaLauncher: false,
-    primaryWeapon: startingWeapon,
-    weapons: {
-      emberBolt: { level: startingWeapon === "emberBolt" ? 1 : 0, cooldown: 0 },
-      plasmaCannon: { level: startingWeapon === "plasmaCannon" ? 1 : 0, cooldown: 0, waveFlip: 1 },
-      orbitBlades: { level: 0, angle: 0 },
-      photonPhazer: { level: 0, active: false, beamAlpha: 0, beamEndX: 0, beamEndY: 0 },
-    },
-    passives: {
-      piercingRounds: 0,
-      weaponRange: 0,
-    },
-    input: {
-      moveX: 0,
-      moveY: 0,
-      strength: 0,
-      active: false,
-      aimX: 1,
-      aimY: 0,
-      boost: 0,
-      dash: false,
-    },
+  const pilot = makePlayerFromMetaProfile(profileMeta || state.meta, startingWeapon);
+  pilot.id = id;
+  pilot.name = name || "Pilot";
+  pilot.x = x;
+  pilot.y = y;
+  pilot.prevX = x;
+  pilot.prevY = y;
+  pilot.vx = 0;
+  pilot.vy = 0;
+  pilot.facing = 0;
+  pilot.rotation = 0;
+  pilot.level = 1;
+  pilot.scrap = 0;
+  pilot.xp = 0;
+  pilot.nextXp = runXpCurve(1);
+  pilot.primaryWeapon = startingWeapon;
+  pilot.weapons.emberBolt.level = startingWeapon === "emberBolt" ? 1 : 0;
+  pilot.weapons.emberBolt.cooldown = 0;
+  pilot.weapons.plasmaCannon.level = startingWeapon === "plasmaCannon" ? 1 : 0;
+  pilot.weapons.plasmaCannon.cooldown = 0;
+  pilot.weapons.plasmaCannon.waveFlip = 1;
+  pilot.weapons.orbitBlades.level = 0;
+  pilot.weapons.orbitBlades.angle = 0;
+  pilot.weapons.orbitBlades.hitMap = new Map();
+  pilot.weapons.photonPhazer.level = 0;
+  pilot.weapons.photonPhazer.active = false;
+  pilot.weapons.photonPhazer.beamAlpha = 0;
+  pilot.weapons.photonPhazer.beamEndX = x;
+  pilot.weapons.photonPhazer.beamEndY = y;
+  pilot.weapons.photonPhazer.target = null;
+  pilot.weapons.novaPulse.level = 0;
+  pilot.weapons.novaPulse.cooldown = 0;
+  pilot.input = {
+    moveX: 0,
+    moveY: 0,
+    strength: 0,
+    active: false,
+    aimX: 1,
+    aimY: 0,
+    boost: 0,
+    dash: false,
   };
+  return pilot;
 }
 
 function ensureMultiplayerRemotePilots() {
@@ -6220,7 +6258,12 @@ function ensureMultiplayerRemotePilots() {
     validIds.add(player.id);
     const existing = runtime.remotePilots[player.id];
     if (!existing) {
-      runtime.remotePilots[player.id] = makeNetworkPilot(player.id, player.name, index + 1);
+      runtime.remotePilots[player.id] = makeNetworkPilot(
+        player.id,
+        player.name,
+        index + 1,
+        state.multiplayer.playerProfiles[player.id] || null
+      );
     } else {
       existing.name = player.name || existing.name;
     }
@@ -6494,6 +6537,10 @@ function applyWorldSnapshot(snapshot) {
   state.pulses = (snapshot.pulses || []).map(entry => ({ ...entry }));
   state.orbitalStrikes = (snapshot.orbitalStrikes || []).map(entry => ({ ...entry }));
   state.voyageZones = (snapshot.voyageZones || []).map(entry => ({ ...entry }));
+  if (voyageUpgradeMenuActive()) {
+    renderVoyageUpgradesMenu();
+  }
+  syncHud();
 }
 
 function currentMultiplayerInput() {
@@ -6740,8 +6787,42 @@ function sendMultiplayerSnapshot(dt) {
   });
 }
 
+function rebuildRemotePilotFromProfile(id, metaProfile) {
+  const runtime = multiplayerRuntime();
+  const existing = runtime.remotePilots[id];
+  const rosterIndex = currentTeamVoyagePlayerRoster().findIndex(player => player.id === id);
+  const rosterEntry = currentTeamVoyagePlayerRoster().find(player => player.id === id);
+  const rebuilt = makeNetworkPilot(id, rosterEntry?.name || existing?.name || "Pilot", Math.max(0, rosterIndex) + 1, metaProfile);
+  if (!existing) return rebuilt;
+  rebuilt.x = existing.x;
+  rebuilt.y = existing.y;
+  rebuilt.prevX = existing.prevX;
+  rebuilt.prevY = existing.prevY;
+  rebuilt.vx = existing.vx;
+  rebuilt.vy = existing.vy;
+  rebuilt.facing = existing.facing;
+  rebuilt.rotation = existing.rotation;
+  rebuilt.input = existing.input || rebuilt.input;
+  rebuilt.boostCharge = existing.boostCharge;
+  rebuilt.dashCooldown = existing.dashCooldown;
+  rebuilt.dashTimer = existing.dashTimer;
+  rebuilt.enginePulse = existing.enginePulse;
+  rebuilt.engineOutput = existing.engineOutput;
+  rebuilt.thrusting = existing.thrusting;
+  rebuilt.boosting = existing.boosting;
+  return rebuilt;
+}
+
 function handleMultiplayerClientEvent(from, payload) {
   if (!payload?.kind) return;
+  if (payload.kind === "profile_sync" && multiplayerRunHost()) {
+    const profileMeta = normalizeMetaProgression(payload.profile?.meta || payload.meta || payload.profile);
+    state.multiplayer.playerProfiles[from] = profileMeta;
+    if (multiplayerRuntime().remotePilots[from]) {
+      multiplayerRuntime().remotePilots[from] = rebuildRemotePilotFromProfile(from, profileMeta);
+    }
+    return;
+  }
   if (payload.kind === "pilot_input" && multiplayerRunHost()) {
     ensureMultiplayerRemotePilots();
     const pilot = multiplayerRuntime().remotePilots[from];
@@ -6750,6 +6831,25 @@ function handleMultiplayerClientEvent(from, payload) {
         ...pilot.input,
         ...(payload.input || {}),
       };
+    }
+    return;
+  }
+  if (payload.kind === "purchase_upgrade" && multiplayerRunHost()) {
+    const pilot = multiplayerRuntime().remotePilots[from];
+    if (!pilot || !payload.upgradeId) return;
+    const choice = availableUpgrades(pilot).find(entry => entry.id === payload.upgradeId);
+    const purchase = applyVoyageUpgradeChoice(choice, pilot);
+    if (!purchase) return;
+    if (choice.type === "weapon" && purchase.previousLevel <= 0) {
+      if (choice.id === "orbitBlades") {
+        floatingText(pilot.x, pilot.y - 52, "Drone Halo Online", "#8af6ff", 0.7);
+      } else if (choice.id === "photonPhazer") {
+        floatingText(pilot.x, pilot.y - 52, "Photon Phazer Online", "#8af6ff", 0.7);
+      } else {
+        floatingText(pilot.x, pilot.y - 52, `${choice.title} Online`, "#8af6ff", 0.7);
+      }
+    } else {
+      floatingText(pilot.x, pilot.y - 52, purchase.purchaseToast, "#8af6ff", 0.66);
     }
     return;
   }
@@ -6941,6 +7041,7 @@ function closeTeamVoyageSocket(message = "", preserveStatus = false) {
   state.multiplayer.playerId = null;
   state.multiplayer.hostId = null;
   state.multiplayer.players = [];
+  state.multiplayer.playerProfiles = {};
   state.multiplayer.roomCode = "";
   state.multiplayer.started = false;
   if (multiplayerRunActive()) {
@@ -6972,6 +7073,10 @@ function connectTeamVoyageSocket(roomCode) {
         state.multiplayer.connected = true;
         state.multiplayer.playerId = message.playerId || null;
         updateTeamVoyageStateFromRoom(message.room);
+        sendMultiplayerClientEvent({
+          kind: "profile_sync",
+          profile: currentMultiplayerProfilePayload(),
+        });
         renderTeamVoyageLobby();
         if (!resolved) {
           resolved = true;
@@ -7016,6 +7121,7 @@ function connectTeamVoyageSocket(roomCode) {
       state.multiplayer.playerId = null;
       state.multiplayer.hostId = null;
       state.multiplayer.players = [];
+      state.multiplayer.playerProfiles = {};
       state.multiplayer.started = false;
       if (runtimeWasActive) {
         clearMultiplayerRuntime();
@@ -7175,6 +7281,9 @@ function handleTeamVoyageBack() {
 }
 
 function showMainMenu(message = "Select a command to continue.") {
+  if (!teamVoyageConnected() && !multiplayerRunActive()) {
+    switchMetaProfile("solo");
+  }
   setMainMenuStatus(message);
   setTeamVoyageStatus("Enter your Render server URL, then host a room or join one by code.");
   clearMenuConfirmHold();
@@ -7221,6 +7330,7 @@ function closeMainMenuSettingsMenu() {
 
 function openTeamVoyageMenu() {
   if (state.mode !== "mainmenu") return;
+  switchMetaProfile("coop");
   keepHubAmbienceAlive();
   mainMenuSettingsMenu?.classList.add("hidden");
   teamVoyageMenu?.classList.remove("hidden");
@@ -7234,6 +7344,9 @@ function closeTeamVoyageMenu() {
   keepHubAmbienceAlive();
   teamVoyageMenu?.classList.add("hidden");
   renderTeamVoyageLobby();
+  if (!teamVoyageConnected() && !multiplayerRunActive()) {
+    switchMetaProfile("solo");
+  }
   state.gamepad.menuIndex = 0;
   syncGamepadFocus();
 }
@@ -7377,6 +7490,11 @@ function closeHangarSettingsMenu() {
   syncGamepadFocus();
 }
 
+function returnToMainMenuFromHangar() {
+  closeHangarSettingsMenu();
+  showMainMenu("Returned to main menu.");
+}
+
 function resetProgress() {
   const confirmed = window.confirm(
     "Reset all Ardonis Credits, upgrades, augments, caches, and lifetime stats? This cannot be undone."
@@ -7419,8 +7537,7 @@ function renderVoyageUpgradesMenu() {
     const alreadyUnlocked = voyageWeaponChoiceUnlocked(choice, player);
     const hubLocked = voyageUpgradeHubLocked(choice);
     const cost = alreadyUnlocked || hubLocked ? 0 : voyageUpgradeCost(choice, player);
-    const hostPurchaseLocked = multiplayerRunClient();
-    const affordable = !hostPurchaseLocked && !alreadyUnlocked && !hubLocked && (player.scrap || 0) >= cost;
+    const affordable = !alreadyUnlocked && !hubLocked && (player.scrap || 0) >= cost;
     const card = document.createElement("div");
     card.className = `meta-upgrade voyage-upgrade${alreadyUnlocked ? " unlocked" : ""}${hubLocked ? " locked" : ""}`;
     card.innerHTML = `
@@ -7437,7 +7554,7 @@ function renderVoyageUpgradesMenu() {
           <p>${voyageUpgradeCardSummary(choice)}</p>
         </div>
       </div>
-      <button type="button" class="voyage-upgrade-purchase${alreadyUnlocked ? " is-unlocked" : ""}" data-voyage-upgrade-id="${choice.id}" ${affordable ? "" : "disabled"}>${hostPurchaseLocked ? "Host Sync Active" : voyageUpgradePurchaseLabel(choice, affordable, cost, player)}</button>
+      <button type="button" class="voyage-upgrade-purchase${alreadyUnlocked ? " is-unlocked" : ""}" data-voyage-upgrade-id="${choice.id}" ${affordable ? "" : "disabled"}>${voyageUpgradePurchaseLabel(choice, affordable, cost, player)}</button>
     `;
     populateUpgradeArt(card.querySelector(".meta-upgrade-icon"), choice.id, choice.title, "meta-upgrade-icon-image");
     const button = card.querySelector("button");
@@ -7445,6 +7562,38 @@ function renderVoyageUpgradesMenu() {
     button.addEventListener("click", () => purchaseVoyageUpgrade(choice));
     voyageUpgradeGrid.appendChild(card);
   }
+}
+
+function applyVoyageUpgradeChoice(choice, player) {
+  if (!choice || !player) return null;
+  if (voyageUpgradeHubLocked(choice)) return null;
+  if (voyageWeaponChoiceUnlocked(choice, player)) return null;
+  const previousLevel = voyageUpgradeLevel(choice, player);
+  const cost = voyageUpgradeCost(choice, player);
+  if ((player.scrap || 0) < cost) return null;
+
+  player.scrap -= cost;
+  if (choice.type === "weapon") {
+    weaponDefs[choice.id]?.apply(player);
+    if (previousLevel <= 0) {
+      incrementVoyageWeaponUnlockCounter(choice.systemType);
+    }
+  } else {
+    passiveDefs[choice.id]?.apply(player);
+  }
+
+  const newLevel = voyageUpgradeLevel(choice, player);
+  return {
+    cost,
+    previousLevel,
+    newLevel,
+    purchaseText: choice.type === "weapon"
+      ? `${choice.title} unlocked.`
+      : `${choice.title} upgraded to ${formatVersionLabel(newLevel)}.`,
+    purchaseToast: choice.type === "weapon"
+      ? `${choice.title} Online`
+      : `${choice.title} ${formatVersionLabel(newLevel)}`,
+  };
 }
 
 function openVoyageUpgradesMenu() {
@@ -7474,40 +7623,30 @@ function closeVoyageUpgradesMenu() {
 function purchaseVoyageUpgrade(choice) {
   if (!choice || !state.player) return;
   if (multiplayerRunClient()) {
-    statusText.textContent = "Client-side voyage purchases are locked during the first sync pass.";
+    if (voyageUpgradeHubLocked(choice)) return;
+    if (voyageWeaponChoiceUnlocked(choice, state.player)) return;
+    const cost = voyageUpgradeCost(choice, state.player);
+    if ((state.player.scrap || 0) < cost) return;
+    sendMultiplayerClientEvent({
+      kind: "purchase_upgrade",
+      upgradeId: choice.id,
+    });
+    statusText.textContent = `Purchase request sent for ${choice.title}.`;
     return;
   }
-  if (voyageUpgradeHubLocked(choice)) return;
-  if (voyageWeaponChoiceUnlocked(choice, state.player)) return;
-  const previousLevel = voyageUpgradeLevel(choice, state.player);
-  const cost = voyageUpgradeCost(choice, state.player);
-  if ((state.player.scrap || 0) < cost) return;
   const previousUpgradeId = choice.id;
   const anchorSelector = `[data-voyage-upgrade-id="${choice.id}"]`;
   const scrollAnchor = captureScrollAnchor(voyageUpgradeGrid, anchorSelector);
-
-  state.player.scrap -= cost;
-  if (choice.type === "weapon") {
-    weaponDefs[choice.id]?.apply(state.player);
-    if (previousLevel <= 0) {
-      incrementVoyageWeaponUnlockCounter(choice.systemType);
-      if (choice.id === "orbitBlades") {
-        playDroneHaloOnlineSfx();
-      } else if (choice.id === "photonPhazer") {
-        playPhotonPhazerOnlineSfx();
-      }
+  const purchase = applyVoyageUpgradeChoice(choice, state.player);
+  if (!purchase) return;
+  const { previousLevel, newLevel, purchaseText, purchaseToast } = purchase;
+  if (choice.type === "weapon" && previousLevel <= 0) {
+    if (choice.id === "orbitBlades") {
+      playDroneHaloOnlineSfx();
+    } else if (choice.id === "photonPhazer") {
+      playPhotonPhazerOnlineSfx();
     }
-  } else {
-    passiveDefs[choice.id]?.apply(state.player);
   }
-
-  const newLevel = voyageUpgradeLevel(choice, state.player);
-  const purchaseText = choice.type === "weapon"
-    ? `${choice.title} unlocked.`
-    : `${choice.title} upgraded to ${formatVersionLabel(newLevel)}.`;
-  const purchaseToast = choice.type === "weapon"
-    ? `${choice.title} Online`
-    : `${choice.title} ${formatVersionLabel(newLevel)}`;
   state.runStats.augments.push(choice.type === "weapon" ? `${choice.title} unlocked` : `${choice.title} ${formatVersionLabel(newLevel)}`);
   statusText.textContent = purchaseText;
   renderVoyageUpgradesMenu();
@@ -10792,8 +10931,7 @@ function gainXp(amount) {
   }
 }
 
-function availableUpgrades() {
-  const player = state.player;
+function availableUpgrades(player = state.player) {
   const list = [];
 
   for (const [id, def] of Object.entries(weaponDefs)) {
@@ -11597,7 +11735,7 @@ function drawNetworkPilots() {
 
     ctx.save();
     ctx.translate(pilot.x, pilot.y);
-    ctx.rotate(pilot.rotation || pilot.facing + Math.PI / 2);
+    ctx.rotate((pilot.facing || 0) + Math.PI / 2);
 
     const thrustGlow = Math.max(0.18, pilot.engineOutput || 0);
     ctx.fillStyle = `rgba(106, 236, 255, ${0.18 + thrustGlow * 0.22})`;
@@ -12966,7 +13104,7 @@ document.addEventListener("keydown", event => {
     closeModMenu();
     return;
   }
-  const isPauseKey = key === "p" || key === "escape";
+  const isPauseKey = key === "escape";
   if (isPauseKey) {
     event.preventDefault();
     if (event.repeat) return;
@@ -13099,6 +13237,7 @@ window.addEventListener("blur", () => {
 
 canvas.addEventListener("pointerdown", event => {
   unlockAudio();
+  if (event.button !== 0) return;
   state.pointerActive = true;
   setPointerFromEvent(event);
 });
@@ -13107,13 +13246,18 @@ canvas.addEventListener("pointermove", event => {
   if (state.pointerActive) setPointerFromEvent(event);
 });
 
+canvas.addEventListener("contextmenu", event => {
+  event.preventDefault();
+});
+
 canvas.addEventListener("pointerleave", () => {
   state.pointerActive = false;
   state.pointerVector.x = 0;
   state.pointerVector.y = 0;
 });
 
-window.addEventListener("pointerup", () => {
+window.addEventListener("pointerup", event => {
+  if (event.button !== 0) return;
   state.pointerActive = false;
   state.pointerVector.x = 0;
   state.pointerVector.y = 0;
@@ -13142,6 +13286,7 @@ startButton.addEventListener("click", () => {
 });
 
 mainMenuSoloButton?.addEventListener("click", () => {
+  switchMetaProfile("solo");
   showHangar("Begin your voyage when ready.");
 });
 
@@ -13296,6 +13441,10 @@ hangarVoyageVentari?.addEventListener("click", () => {
 
 hangarSettingsBack.addEventListener("click", () => {
   closeHangarSettingsMenu();
+});
+
+hangarReturnMainMenu?.addEventListener("click", () => {
+  returnToMainMenuFromHangar();
 });
 
 hangarResetProgress.addEventListener("click", () => {
